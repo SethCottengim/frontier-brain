@@ -22,6 +22,7 @@ User makes decision in conversation
 | `python bin/decision-engine.py graph <ADR-ID>` | Graph traversal, connected decisions JSON |
 | `python bin/decision-engine.py related <ADR-ID>` | Combined: graph neighbors + tag matches |
 | `python bin/decision-engine.py next-id` | Next sequential ADR ID |
+| `python bin/visualize.py --open` | Generate + open interactive graph visualization |
 
 ## Skills
 

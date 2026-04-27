@@ -3,7 +3,7 @@
 ## Phase 1: Foundation
 
 ### Task 1: ADR Schema & Template
-**Status:** todo
+**Status:** done
 **Depends on:** nothing
 **Delivers:** ADR markdown format definition + template file + schema docs
 
@@ -26,7 +26,7 @@
 ---
 
 ### Task 2: Hybrid Index Engine (graphdb + FTS5)
-**Status:** todo
+**Status:** done
 **Depends on:** Task 1 (needs schema)
 **Delivers:** `bin/decision-engine.py` — CLI wrapping both graphdb and SQLite FTS5
 
@@ -67,7 +67,7 @@
 ---
 
 ### Task 3: Seed with Existing Decisions
-**Status:** todo
+**Status:** done
 **Depends on:** Task 1 (format) + Task 2 (engine, to verify)
 **Delivers:** 8-12 ADR files distilled from existing SEMPL ADRs + CLAUDE.md
 
@@ -106,7 +106,7 @@
 ## Phase 2: Retrieval
 
 ### Task 4: Skill Definitions
-**Status:** todo
+**Status:** done
 **Depends on:** nothing (can parallel with Phase 1)
 **Delivers:** SKILL.md files + command shortcuts
 
@@ -136,7 +136,7 @@
 ---
 
 ### Task 5: Recall Skill Implementation
-**Status:** todo
+**Status:** done
 **Depends on:** Task 2 (engine) + Task 4 (skill def)
 **Delivers:** Working dual-index recall — text search + graph traversal merged
 
@@ -173,7 +173,7 @@
 ## Phase 3: Auto-Recording
 
 ### Task 6: Record Skill Implementation
-**Status:** todo
+**Status:** done
 **Depends on:** Task 1 (template) + Task 2 (engine) + Task 4 (skill def)
 **Delivers:** Autonomous record flow — Claude extracts + writes + indexes without human review
 
@@ -219,7 +219,7 @@
 ---
 
 ### Task 7: Decision Detection Hook (Auto-Trigger)
-**Status:** todo
+**Status:** done
 **Depends on:** Task 6 (record skill must work first)
 **Delivers:** UserPromptSubmit hook that auto-triggers recording
 
