@@ -412,18 +412,47 @@ const height = window.innerHeight;
 // Center initially
 svg.call(zoom.transform, d3.zoomIdentity.translate(width/2, height/2));
 
-// Force simulation
+// Tag clustering: nudge same-tag nodes toward shared centroid (gentle, inside sphere)
+function tagCluster(alpha) {
+  const centroids = {};
+  const counts = {};
+  DATA.nodes.forEach(d => {
+    const tag = (d.tags && d.tags[0]) || '__none__';
+    if (!centroids[tag]) { centroids[tag] = {x: 0, y: 0}; counts[tag] = 0; }
+    centroids[tag].x += d.x || 0;
+    centroids[tag].y += d.y || 0;
+    counts[tag]++;
+  });
+  for (const tag in centroids) {
+    centroids[tag].x /= counts[tag];
+    centroids[tag].y /= counts[tag];
+  }
+  const strength = 0.06 * alpha;
+  DATA.nodes.forEach(d => {
+    const tag = (d.tags && d.tags[0]) || '__none__';
+    const c = centroids[tag];
+    d.vx += (c.x - d.x) * strength;
+    d.vy += (c.y - d.y) * strength;
+  });
+}
+
+// Force simulation — tight sphere + tag clustering
+const nodeCount = DATA.nodes.length;
+const baseRadius = Math.max(80, Math.sqrt(nodeCount) * 22);
+
 const simulation = d3.forceSimulation(DATA.nodes)
-  .force('link', d3.forceLink(DATA.links).id(d => d.id).distance(120).strength(0.4))
-  .force('charge', d3.forceManyBody().strength(-350).distanceMax(500))
-  .force('center', d3.forceCenter(0, 0).strength(0.05))
-  .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 20))
-  .alphaDecay(0.01)
-  .velocityDecay(0.3);
+  .force('link', d3.forceLink(DATA.links).id(d => d.id).distance(45).strength(0.9))
+  .force('charge', d3.forceManyBody().strength(-80).distanceMax(baseRadius * 2))
+  .force('center', d3.forceCenter(0, 0).strength(0.3))
+  .force('radial', d3.forceRadial(baseRadius * 0.6, 0, 0).strength(0.15))
+  .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 3).strength(0.7))
+  .force('tagCluster', tagCluster)
+  .alphaDecay(0.008)
+  .velocityDecay(0.4);
 
 function nodeRadius(d) {
   const count = connectionCount[d.id] || 0;
-  return 6 + count * 3;
+  return 2.5 + count * 1;
 }
 
 // Links
@@ -471,10 +500,11 @@ node.append('circle')
   .attr('stroke-width', 1.5)
   .attr('stroke-opacity', 0.4);
 
-// Labels
+// Labels — hidden by default, shown on hover
 node.append('text')
   .attr('class', 'node-label')
-  .attr('dy', d => nodeRadius(d) + 16)
+  .attr('dy', d => nodeRadius(d) + 10)
+  .attr('opacity', 0)
   .text(d => d.id);
 
 // Drag behavior
@@ -535,6 +565,7 @@ function highlightNode(d) {
   node.select('.node-glow')
     .attr('opacity', n => connected.has(n.id) ? 0.25 : 0.03);
   node.select('.node-label')
+    .attr('opacity', n => connected.has(n.id) ? 0.9 : 0)
     .attr('fill', n => connected.has(n.id) ? '#ddd' : '#333')
     .classed('highlighted', n => n.id === d.id);
 
@@ -552,7 +583,7 @@ function highlightNode(d) {
 function clearHighlight() {
   node.select('.node-circle').attr('opacity', 0.85);
   node.select('.node-glow').attr('opacity', 0.15);
-  node.select('.node-label').attr('fill', '#aaa').classed('highlighted', false);
+  node.select('.node-label').attr('opacity', 0).attr('fill', '#aaa').classed('highlighted', false);
   link.attr('stroke-opacity', 0.25).attr('stroke-width', 1);
 }
 
