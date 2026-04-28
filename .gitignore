@@ -1,7 +1,4 @@
 # Derived files (rebuildable from markdown)
-decisions/graph.db
-decisions/search.db
-decisions/graph.html
 decisions/ADR*
 
 # Python
