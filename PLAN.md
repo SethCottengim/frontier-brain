@@ -125,28 +125,28 @@ Tasks 1-3, 6 are independent. Task 4 depends on all. Task 5 trivial. Task 7 vali
 
 ### Task 1: Repo Restructure — Move Skills Into Repo
 
-**Status:** not started
+**Status:** done
 **Estimate:** small (~5k tokens)
 
-- [ ] Copy `~/.claude/skills/decision-harvest/SKILL.md` → repo `.claude/skills/decision-harvest/SKILL.md`
-- [ ] Copy `~/.claude/skills/open-brain/SKILL.md` → repo `.claude/skills/open-brain/SKILL.md`
-- [ ] Verify all 4 skills present in repo `.claude/skills/`
-- [ ] Remove stale `decisions/` dir from repo (TEMPLATE.md, SCHEMA.md go to `docs/` or root)
+- [x] Copy `~/.claude/skills/decision-harvest/SKILL.md` → repo `.claude/skills/decision-harvest/SKILL.md`
+- [x] Copy `~/.claude/skills/open-brain/SKILL.md` → repo `.claude/skills/open-brain/SKILL.md`
+- [x] Verify all 4 skills present in repo `.claude/skills/`
+- [x] Remove stale `decisions/` dir from repo (TEMPLATE.md, SCHEMA.md moved to root)
 
 ---
 
 ### Task 2: Eliminate PyYAML Dependency
 
-**Status:** not started
+**Status:** done
 **Estimate:** medium (~20k tokens)
 
-- [ ] Create `lib/frontmatter.py` — parse `---` fenced YAML frontmatter
+- [x] Create `lib/frontmatter.py` — parse `---` fenced YAML frontmatter
   - Handle: strings, integers, dates (YYYY-MM-DD), lists (`[a, b]` and `- item`), empty values
   - Return: `(metadata_dict, body_string)`
   - No nested objects, no anchors, no multi-line strings — flat only
-- [ ] Update `bin/decision-engine.py`: replace `import yaml` with `from lib.frontmatter import parse`
+- [x] Update `bin/decision-engine.py`: replace `import yaml` with `from lib.frontmatter import parse`
   - Fix all `yaml.safe_load()` calls to use new parser
-- [ ] Test against every existing record in `~/.claude/decisions/*.md`
+- [x] Test against every existing record in `~/.claude/decisions/*.md`
   - Parse with both old (yaml) and new (frontmatter.py), diff outputs
   - Zero differences = pass
 
@@ -154,23 +154,23 @@ Tasks 1-3, 6 are independent. Task 4 depends on all. Task 5 trivial. Task 7 vali
 
 ### Task 3: Rewrite Hook in Python
 
-**Status:** not started
+**Status:** done
 **Estimate:** small (~10k tokens)
 
-- [ ] Create `hooks/decision-detect.py` — same behavior as current `.js`:
+- [x] Create `hooks/decision-detect.py` — same behavior as current `.js`:
   - Read JSON from stdin
   - Detect project via `git remote get-url origin` (fallback: basename of cwd)
   - Detect user via `$USER` env var
   - Output `hookSpecificOutput` JSON to stdout
-- [ ] Remove `hooks/decision-detect.js`
-- [ ] Update `.claude/settings.json` in repo to reference `.py` not `.js`
-- [ ] Test: pipe sample hook input JSON → verify output matches expected format
+- [x] Remove `hooks/decision-detect.js`
+- [x] Update `.claude/settings.json` in repo to reference `.py` not `.js`
+- [x] Test: pipe sample hook input JSON → verify output matches expected format
 
 ---
 
 ### Task 4: Build Installer (`installer/main.py`)
 
-**Status:** not started
+**Status:** done
 **Estimate:** large — decomposed into subtasks below
 
 This is the core work. ~300-400 lines of Python. Broken into 5 subtasks.
@@ -179,57 +179,57 @@ This is the core work. ~300-400 lines of Python. Broken into 5 subtasks.
 
 **Estimate:** ~10k tokens
 
-- [ ] Parse args: `install` (default), `uninstall`, `--force`
-- [ ] `check_prereqs()`: verify Python >= 3.11, print actionable error if not
-- [ ] Detect repo root (script's parent dir)
-- [ ] Detect git commit hash via `git rev-parse HEAD`
+- [x] Parse args: `install` (default), `uninstall`, `--force`
+- [x] `check_prereqs()`: verify Python >= 3.11, print actionable error if not
+- [x] Detect repo root (script's parent dir)
+- [x] Detect git commit hash via `git rev-parse HEAD`
 
 #### Task 4b: Manifest — Load, Build, Diff
 
 **Estimate:** ~15k tokens
 
-- [ ] `load_manifest(path)` — read `~/.claude/frontier-brain/.manifest` or return `{"commit": None, "files": []}`
-- [ ] `build_manifest(repo_root)` — scan repo, produce source→target path mapping + commit hash
+- [x] `load_manifest(path)` — read `~/.claude/frontier-brain/.manifest` or return `{"commit": None, "files": []}`
+- [x] `build_manifest(repo_root)` — scan repo, produce source→target path mapping + commit hash
   - Hardcoded mapping: `bin/*` → `~/.claude/frontier-brain/bin/*`, `lib/*` → `~/.claude/frontier-brain/lib/*`, etc.
   - Skills: `.claude/skills/*/SKILL.md` → `~/.claude/skills/*/SKILL.md`
   - Hook: `hooks/decision-detect.py` → `~/.claude/hooks/frontier-brain/decision-detect.py`
-- [ ] `diff_manifests(old, new)` — return `{added: [], updated: [], removed: [], unchanged: []}`
+- [x] `diff_manifests(old, new)` — return `{added: [], updated: [], removed: [], unchanged: []}`
 
 #### Task 4c: File Operations — Install, Cleanup, Reindex
 
 **Estimate:** ~15k tokens
 
-- [ ] `install_files(file_map)` — mkdir -p parents, copy files, return counts
-- [ ] `cleanup_stale(removed_files)` — delete files in old manifest but not in new, remove empty parent dirs
-- [ ] `reindex_db()` — subprocess call to `decision-engine.py index`
-- [ ] `save_manifest(path, manifest)` — write new manifest JSON
+- [x] `install_files(file_map)` — mkdir -p parents, copy files, return counts
+- [x] `cleanup_stale(removed_files)` — delete files in old manifest but not in new, remove empty parent dirs
+- [x] `reindex_db()` — subprocess call to `decision-engine.py index`
+- [x] `save_manifest(path, manifest)` — write new manifest JSON
 
 #### Task 4d: Settings.json — Surgical Merge
 
 **Estimate:** ~20k tokens
 
-- [ ] `backup_settings(path)` — copy to `settings.json.bak-frontier-brain`
-- [ ] `merge_hook(settings_path, hook_command)`:
+- [x] `backup_settings(path)` — copy to `settings.json.bak-frontier-brain`
+- [x] `merge_hook(settings_path, hook_command)`:
   - Load JSON
   - Find existing frontier-brain hook entry (search for `decision-detect` in command strings)
   - If found: update command in place (handles .js→.py migration, timeout changes)
   - If not found: append new entry to `UserPromptSubmit` hooks array
   - If `UserPromptSubmit` key missing: create it
   - Write JSON back (preserve formatting with `indent=2`)
-- [ ] `remove_hook(settings_path)` — find and remove frontier-brain hook entry, clean up empty arrays
+- [x] `remove_hook(settings_path)` — find and remove frontier-brain hook entry, clean up empty arrays
 
 #### Task 4e: Uninstall + Smart Output
 
 **Estimate:** ~15k tokens
 
-- [ ] `uninstall()`:
+- [x] `uninstall()`:
   - Load manifest
   - Delete all listed files
   - Remove hook from settings.json
   - Delete manifest file
   - Remove empty dirs (`frontier-brain/bin/`, `frontier-brain/lib/`, etc.)
   - Print: "Uninstalled. Your decisions in ~/.claude/decisions/ were preserved."
-- [ ] `print_summary(mode, counts)`:
+- [x] `print_summary(mode, counts)`:
   - Fresh install: file count, skill count, hook status, brain.db record count
   - Upgrade: files updated/added/removed, skills changed, hook status
   - Up to date: one line + hint about `--force`
@@ -239,16 +239,16 @@ This is the core work. ~300-400 lines of Python. Broken into 5 subtasks.
 
 ### Task 5: Bash Wrapper
 
-**Status:** not started
+**Status:** done
 **Estimate:** trivial (~2k tokens)
 
-- [ ] Rewrite `install.sh`:
+- [x] Rewrite `install.sh`:
   ```bash
   #!/usr/bin/env bash
   command -v python3 >/dev/null 2>&1 || { echo "Error: python3 is required. Install Python 3.11+."; exit 1; }
   exec python3 "$(dirname "$0")/installer/main.py" "$@"
   ```
-- [ ] Delete old `install.sh` content
+- [x] Delete old `install.sh` content
 
 ---
 
@@ -261,20 +261,22 @@ This is the core work. ~300-400 lines of Python. Broken into 5 subtasks.
 
 ### Task 7: End-to-End Testing
 
-**Status:** not started
+**Status:** done
 **Estimate:** medium (~20k tokens)
 
-Test scenarios (manual or scripted):
+Test script: `tests/test_e2e.py` — 9 scenarios, 32 assertions, uses temp dirs (never touches real `~/.claude/`).
 
-- [ ] **Fresh install** on empty `~/.claude/` — all files created, hook registered, brain.db initialized, manifest written
-- [ ] **Upgrade from legacy** (no manifest exists) — treats as fresh install, old .js hook replaced with .py
-- [ ] **Upgrade from v2** (manifest exists, different commit) — files updated, stale files removed, manifest updated
-- [ ] **Same version** — prints "already up to date", exits 0
-- [ ] **Same version + `--force`** — reinstalls everything
-- [ ] **Uninstall** — all managed files removed, hook removed from settings.json, `~/.claude/decisions/` preserved, manifest deleted
-- [ ] **Uninstall when not installed** — graceful error message
-- [ ] **Prereq failure** — Python 3.10 → clear error message (test with version mock if needed)
-- [ ] **Corrupted settings.json** — graceful error, no data loss (backup exists)
+Run: `python3 tests/test_e2e.py`
+
+- [x] **Fresh install** on empty `~/.claude/` — all files created, hook registered, brain.db initialized, manifest written
+- [x] **Upgrade from legacy** (no manifest exists) — treats as fresh install, old .js hook replaced with .py
+- [x] **Upgrade from v2** (manifest exists, different commit) — files updated, stale files removed, manifest updated
+- [x] **Same version** — prints "already up to date", exits 0
+- [x] **Same version + `--force`** — reinstalls everything
+- [x] **Uninstall** — all managed files removed, hook removed from settings.json, `~/.claude/decisions/` preserved, manifest deleted
+- [x] **Uninstall when not installed** — graceful error message
+- [x] **Prereq failure** — Python 3.10 → clear error message (test with version mock if needed)
+- [x] **Corrupted settings.json** — graceful error, no data loss (backup exists)
 
 ## Risks
 

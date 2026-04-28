@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node hooks/decision-detect.js"
+            "command": "python3 hooks/decision-detect.py"
           }
         ]
       }

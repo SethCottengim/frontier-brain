@@ -15,8 +15,10 @@ import re
 import sqlite3
 import subprocess
 import sys
-import yaml
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from frontmatter import parse as parse_frontmatter
 
 DECISIONS_DIR = Path.home() / ".claude" / "decisions"
 DB_PATH = DECISIONS_DIR / "brain.db"
@@ -62,16 +64,13 @@ def init_db() -> sqlite3.Connection:
 
 def parse_record(filepath: Path) -> dict | None:
     text = filepath.read_text(encoding="utf-8")
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None
     try:
-        meta = yaml.safe_load(parts[1])
-    except yaml.YAMLError:
+        meta, body = parse_frontmatter(text)
+    except ValueError:
         return None
     if not meta or "id" not in meta:
         return None
-    meta["body"] = parts[2].strip()
+    meta["body"] = body
     meta["file"] = filepath.name
     return meta
 
