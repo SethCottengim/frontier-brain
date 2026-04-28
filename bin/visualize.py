@@ -788,13 +788,13 @@ const activeTypes = new Set(allTypes);
   const el = document.getElementById('filter-content');
   const icons = { decision: '&#9679;', knowledge: '&#9670;', context: '&#11041;' };
   let h = '<div class="filter-section"><h4>Projects</h4>';
-  h += '<div class="filter-actions"><button onclick="toggleAll(\'project\',true)">All</button><button onclick="toggleAll(\'project\',false)">None</button></div>';
+  h += '<div class="filter-actions"><button onclick="toggleAll(&apos;project&apos;,true)">All</button><button onclick="toggleAll(&apos;project&apos;,false)">None</button></div>';
   allProjects.forEach(p => {
     const c = projectColorMap[p] || '#8b949e';
     h += '<label class="filter-cb"><input type="checkbox" checked data-filter="project" data-value="' + p + '"><span class="cb-dot" style="background:' + c + '"></span>' + (p || '<em>none</em>') + '</label>';
   });
   h += '</div><div class="filter-section"><h4>Types</h4>';
-  h += '<div class="filter-actions"><button onclick="toggleAll(\'type\',true)">All</button><button onclick="toggleAll(\'type\',false)">None</button></div>';
+  h += '<div class="filter-actions"><button onclick="toggleAll(&apos;type&apos;,true)">All</button><button onclick="toggleAll(&apos;type&apos;,false)">None</button></div>';
   allTypes.forEach(t => {
     h += '<label class="filter-cb"><input type="checkbox" checked data-filter="type" data-value="' + t + '"><span style="width:14px;text-align:center;font-size:11px">' + icons[t] + '</span>' + t + '</label>';
   });
