@@ -1,49 +1,66 @@
 #!/usr/bin/env python3
 """
-Decision Engine CLI — dual-index (graph + FTS5) over ADR markdown files.
+Decision Engine CLI — single-db (brain.db) over decision markdown files.
 
 Commands:
-    index           Rebuild both graph.db and search.db from decisions/*.md
-    search <query>  Full-text search via FTS5, returns ranked JSON
-    graph <id>      Graph traversal, returns all connected decisions as JSON
-    related <id>    Combined: graph neighbors + FTS5 on shared tags
-    next-id         Returns next sequential ADR ID
-    serve           Start API server with Canvas visualization (default port 8877)
+    index           Rebuild brain.db from ~/.claude/decisions/*.md
+    next-id         Returns next sequential integer ID
+    search <query>  FTS5 full-text search (--project, --type filters)
+    graph <id>      Traverse relationships, return connected records
+    related <id>    Graph neighbors + tag-matched records
 """
 
 import json
-import os
 import re
 import sqlite3
+import subprocess
 import sys
-import webbrowser
 import yaml
-from http.server import HTTPServer
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent
-DECISIONS_DIR = PROJECT_DIR / "decisions"
-GRAPH_DB_PATH = DECISIONS_DIR / "graph.db"
-SEARCH_DB_PATH = DECISIONS_DIR / "search.db"
+DECISIONS_DIR = Path.home() / ".claude" / "decisions"
+DB_PATH = DECISIONS_DIR / "brain.db"
 
-sys.path.insert(0, str(PROJECT_DIR / "lib"))
-from graphdb import GraphDB
-from router import Router, APIHandler
+SCHEMA_SQL = [
+    """CREATE TABLE IF NOT EXISTS decisions (
+        id INTEGER PRIMARY KEY,
+        title TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('decision', 'knowledge', 'context')),
+        status TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'deprecated')),
+        date TEXT,
+        project TEXT,
+        tags_json TEXT DEFAULT '[]',
+        affects_json TEXT DEFAULT '[]',
+        recorded_by TEXT,
+        body TEXT,
+        file TEXT
+    )""",
+    """CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
+        id, title, tags, body, project,
+        tokenize='porter unicode61'
+    )""",
+    """CREATE TABLE IF NOT EXISTS relationships (
+        source_id INTEGER NOT NULL,
+        target_id INTEGER NOT NULL,
+        relation_type TEXT NOT NULL CHECK(relation_type IN ('supersedes', 'superseded_by', 'related_to')),
+        UNIQUE(source_id, target_id, relation_type)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_id)",
+    "CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_id)",
+]
 
-INVERSE_RELATIONS = {
-    "supersedes": "superseded_by",
-    "superseded_by": "supersedes",
-    "related_to": "related_to",
-    "informs": "informed_by",
-    "informed_by": "informs",
-    "contradicts": "contradicts",
-    "refines": "refined_by",
-    "refined_by": "refines",
-}
+
+def init_db() -> sqlite3.Connection:
+    DECISIONS_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    for sql in SCHEMA_SQL:
+        conn.execute(sql)
+    conn.commit()
+    return conn
 
 
-def parse_adr(filepath: Path) -> dict | None:
+def parse_record(filepath: Path) -> dict | None:
     text = filepath.read_text(encoding="utf-8")
     parts = text.split("---", 2)
     if len(parts) < 3:
@@ -55,292 +72,268 @@ def parse_adr(filepath: Path) -> dict | None:
     if not meta or "id" not in meta:
         return None
     meta["body"] = parts[2].strip()
-    meta["file"] = str(filepath.relative_to(PROJECT_DIR))
+    meta["file"] = filepath.name
     return meta
 
 
-def discover_adrs() -> list[dict]:
-    adrs = []
-    for f in sorted(DECISIONS_DIR.glob("ADR-*.md")):
-        adr = parse_adr(f)
-        if adr:
-            adrs.append(adr)
-    return adrs
+def discover_records() -> list[dict]:
+    records = []
+    for f in sorted(DECISIONS_DIR.glob("[0-9][0-9][0-9]-*.md")):
+        rec = parse_record(f)
+        if rec:
+            records.append(rec)
+    return records
 
 
-def build_search_db(adrs: list[dict]):
-    if SEARCH_DB_PATH.exists():
-        SEARCH_DB_PATH.unlink()
-    conn = sqlite3.connect(str(SEARCH_DB_PATH))
-    conn.execute(
-        """CREATE VIRTUAL TABLE IF NOT EXISTS decisions USING fts5(
-            id, title, tags, body, project, file,
-            tokenize='porter unicode61'
-        )"""
-    )
-    for adr in adrs:
-        tags = " ".join(adr.get("tags", []) or [])
+def index_records(conn: sqlite3.Connection, records: list[dict]):
+    conn.execute("DELETE FROM decisions")
+    conn.execute("DELETE FROM decisions_fts")
+    conn.execute("DELETE FROM relationships")
+
+    for rec in records:
+        tags = rec.get("tags") or []
+        affects = rec.get("affects") or []
         conn.execute(
-            "INSERT INTO decisions (id, title, tags, body, project, file) VALUES (?,?,?,?,?,?)",
+            """INSERT INTO decisions (id, title, type, status, date, project,
+               tags_json, affects_json, recorded_by, body, file)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                adr["id"],
-                adr.get("title", ""),
-                tags,
-                adr.get("body", ""),
-                adr.get("project", ""),
-                adr.get("file", ""),
+                int(rec["id"]),
+                rec.get("title", ""),
+                rec.get("type", "decision"),
+                rec.get("status", "active"),
+                str(rec.get("date", "")),
+                rec.get("project", ""),
+                json.dumps(tags),
+                json.dumps(affects),
+                rec.get("recorded_by", ""),
+                rec.get("body", ""),
+                rec.get("file", ""),
             ),
         )
+        conn.execute(
+            "INSERT INTO decisions_fts (id, title, tags, body, project) VALUES (?, ?, ?, ?, ?)",
+            (
+                int(rec["id"]),
+                rec.get("title", ""),
+                " ".join(tags),
+                rec.get("body", ""),
+                rec.get("project", ""),
+            ),
+        )
+
+        for superseded_id in rec.get("supersedes") or []:
+            conn.execute(
+                "INSERT OR IGNORE INTO relationships (source_id, target_id, relation_type) VALUES (?, ?, ?)",
+                (int(rec["id"]), int(superseded_id), "supersedes"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO relationships (source_id, target_id, relation_type) VALUES (?, ?, ?)",
+                (int(superseded_id), int(rec["id"]), "superseded_by"),
+            )
+
+        for related_id in rec.get("related") or []:
+            conn.execute(
+                "INSERT OR IGNORE INTO relationships (source_id, target_id, relation_type) VALUES (?, ?, ?)",
+                (int(rec["id"]), int(related_id), "related_to"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO relationships (source_id, target_id, relation_type) VALUES (?, ?, ?)",
+                (int(related_id), int(rec["id"]), "related_to"),
+            )
+
     conn.commit()
-    conn.close()
-
-
-def build_graph_db(adrs: list[dict]):
-    if GRAPH_DB_PATH.exists():
-        GRAPH_DB_PATH.unlink()
-    db = GraphDB(str(GRAPH_DB_PATH))
-    for adr in adrs:
-        adr_id = adr["id"]
-        for superseded_id in adr.get("supersedes", None) or []:
-            db.store_relation(adr_id, "supersedes", superseded_id)
-            db.store_relation(superseded_id, "superseded_by", adr_id)
-        for related_id in adr.get("related", None) or []:
-            db.store_relation(adr_id, "related_to", related_id)
-            db.store_relation(related_id, "related_to", adr_id)
-    db.close()
 
 
 def cmd_index():
-    adrs = discover_adrs()
-    build_search_db(adrs)
-    build_graph_db(adrs)
-    print(json.dumps({"indexed": len(adrs), "graph_db": str(GRAPH_DB_PATH), "search_db": str(SEARCH_DB_PATH)}))
-
-
-def sanitize_fts5_query(query: str) -> str:
-    tokens = query.split()
-    sanitized = []
-    for t in tokens:
-        clean = re.sub(r'[^\w-]', '', t)
-        if clean:
-            sanitized.append('"' + clean + '"')
-    return " OR ".join(sanitized) if sanitized else query
-
-
-def cmd_search(query: str):
-    if not SEARCH_DB_PATH.exists():
-        print(json.dumps({"error": "search.db not found — run 'index' first"}))
-        sys.exit(1)
-    conn = sqlite3.connect(str(SEARCH_DB_PATH))
-    safe_query = sanitize_fts5_query(query)
-    rows = conn.execute(
-        """SELECT id, title, tags, project, file, rank
-           FROM decisions
-           WHERE decisions MATCH ?
-           ORDER BY rank
-           LIMIT 20""",
-        (safe_query,),
-    ).fetchall()
+    conn = init_db()
+    records = discover_records()
+    index_records(conn, records)
     conn.close()
-    results = [
-        {"id": r[0], "title": r[1], "tags": r[2], "project": r[3], "file": r[4], "rank": r[5]}
-        for r in rows
-    ]
-    print(json.dumps({"query": query, "count": len(results), "results": results}))
-
-
-def cmd_graph(adr_id: str):
-    if not GRAPH_DB_PATH.exists():
-        print(json.dumps({"error": "graph.db not found — run 'index' first"}))
-        sys.exit(1)
-    db = GraphDB(str(GRAPH_DB_PATH))
-    outgoing = {}
-    for rel in db.relations_of(adr_id):
-        outgoing[rel] = list(db.find(adr_id, rel))
-    incoming = {}
-    for src, rel in db.relations_to(adr_id):
-        incoming.setdefault(rel, []).append(src)
-    db.close()
-    print(json.dumps({"id": adr_id, "outgoing": outgoing, "incoming": incoming}))
-
-
-def cmd_related(adr_id: str):
-    if not GRAPH_DB_PATH.exists() or not SEARCH_DB_PATH.exists():
-        print(json.dumps({"error": "databases not found — run 'index' first"}))
-        sys.exit(1)
-    db = GraphDB(str(GRAPH_DB_PATH))
-    neighbors = set()
-    for rel in db.relations_of(adr_id):
-        for dst in db.find(adr_id, rel):
-            neighbors.add(dst)
-    for src, rel in db.relations_to(adr_id):
-        neighbors.add(src)
-    db.close()
-
-    conn = sqlite3.connect(str(SEARCH_DB_PATH))
-    row = conn.execute("SELECT tags FROM decisions WHERE id=?", (adr_id,)).fetchone()
-    tag_matches = []
-    if row and row[0]:
-        tags = row[0].split()
-        for tag in tags:
-            quoted_tag = '"' + tag.replace('"', '') + '"'
-            hits = conn.execute(
-                "SELECT id FROM decisions WHERE decisions MATCH ? AND id != ?",
-                (quoted_tag, adr_id),
-            ).fetchall()
-            for h in hits:
-                if h[0] not in neighbors:
-                    tag_matches.append(h[0])
-    conn.close()
-    print(
-        json.dumps(
-            {
-                "id": adr_id,
-                "graph_neighbors": sorted(neighbors),
-                "tag_matches": sorted(set(tag_matches)),
-            }
-        )
-    )
+    print(json.dumps({"indexed": len(records), "db": str(DB_PATH)}))
 
 
 def cmd_next_id():
-    existing = sorted(DECISIONS_DIR.glob("ADR-*.md"))
-    max_num = 0
-    for f in existing:
-        m = re.match(r"ADR-(\d+)", f.stem)
-        if m:
-            max_num = max(max_num, int(m.group(1)))
-    next_num = max_num + 1
-    print(json.dumps({"next_id": f"ADR-{next_num:03d}", "next_num": next_num}))
+    conn = init_db()
+    row = conn.execute("SELECT MAX(id) FROM decisions").fetchone()
+    conn.close()
+    next_id = (row[0] or 0) + 1
+    print(json.dumps({"next_id": next_id}))
 
 
-def cmd_serve(port=8877, open_browser=False):
-    router = Router()
-    adrs_cache = []
-
-    def _load_adrs():
-        if not adrs_cache:
-            adrs_cache.extend(discover_adrs())
-        return adrs_cache
-
-    @router.route('/api/nodes')
-    def nodes(params):
-        adrs = _load_adrs()
-        results = []
-        for adr in adrs:
-            tags = adr.get("tags", []) or []
-            results.append({
-                "id": adr["id"],
-                "title": adr.get("title", ""),
-                "status": adr.get("status", "proposed"),
-                "date": str(adr.get("date", "")),
-                "tags": tags,
-                "project": adr.get("project", ""),
-                "file": adr.get("file", ""),
-            })
-        tag_filter = params.get("tag", [None])[0]
-        if tag_filter:
-            results = [n for n in results if tag_filter in n["tags"]]
-        status_filter = params.get("status", [None])[0]
-        if status_filter:
-            results = [n for n in results if n["status"] == status_filter]
-        project_filter = params.get("project", [None])[0]
-        if project_filter:
-            results = [n for n in results if n["project"].startswith(project_filter)]
-        limit = int(params.get("limit", [0])[0] or 0)
-        offset = int(params.get("offset", [0])[0] or 0)
-        if limit:
-            results = results[offset:offset + limit]
-        elif offset:
-            results = results[offset:]
-        return {"nodes": results, "total": len(_load_adrs())}
-
-    @router.route('/api/links')
-    def links(params):
-        if not GRAPH_DB_PATH.exists():
-            return {"links": [], "total": 0}
-        db = GraphDB(str(GRAPH_DB_PATH))
-        all_links = []
-        for src, rel, dst in db.list_relations():
-            if rel == "superseded_by" or (rel == "related_to" and src > dst):
-                continue
-            all_links.append({"source": src, "target": dst, "relation": rel})
-        db.close()
-        node_filter = params.get("node", [None])[0]
-        if node_filter:
-            all_links = [l for l in all_links if l["source"] == node_filter or l["target"] == node_filter]
-        rel_filter = params.get("relation", [None])[0]
-        if rel_filter:
-            all_links = [l for l in all_links if l["relation"] == rel_filter]
-        return {"links": all_links, "total": len(all_links)}
-
-    @router.route('/api/search')
-    def search(params):
-        query = params.get("q", [""])[0]
-        if not query or not SEARCH_DB_PATH.exists():
-            return {"query": query, "results": [], "count": 0}
-        conn = sqlite3.connect(str(SEARCH_DB_PATH))
-        safe_query = sanitize_fts5_query(query)
-        rows = conn.execute(
-            """SELECT id, title, tags, project, file, rank,
-                      snippet(decisions, 3, '<b>', '</b>', '...', 32)
-               FROM decisions
-               WHERE decisions MATCH ?
-               ORDER BY rank
-               LIMIT 20""",
-            (safe_query,),
-        ).fetchall()
-        conn.close()
-        results = [
-            {"id": r[0], "title": r[1], "rank": r[5], "snippet": r[6]}
-            for r in rows
-        ]
-        return {"query": query, "results": results, "count": len(results)}
-
-    @router.route('/api/tags')
-    def tags(params):
-        adrs = _load_adrs()
-        tag_counts = {}
-        for adr in adrs:
-            for t in (adr.get("tags", []) or []):
-                tag_counts[t] = tag_counts.get(t, 0) + 1
-        tag_list = sorted([{"name": k, "count": v} for k, v in tag_counts.items()], key=lambda x: -x["count"])
-        return {"tags": tag_list}
-
-    @router.route('/api/stats')
-    def stats(params):
-        adrs = _load_adrs()
-        statuses = {}
-        tag_set = set()
-        for adr in adrs:
-            s = adr.get("status", "proposed")
-            statuses[s] = statuses.get(s, 0) + 1
-            for t in (adr.get("tags", []) or []):
-                tag_set.add(t)
-        link_count = 0
-        if GRAPH_DB_PATH.exists():
-            db = GraphDB(str(GRAPH_DB_PATH))
-            for src, rel, dst in db.list_relations():
-                if rel == "superseded_by" or (rel == "related_to" and src > dst):
-                    continue
-                link_count += 1
-            db.close()
-        return {"nodes": len(adrs), "links": link_count, "tags": len(tag_set), "statuses": statuses}
-
-    APIHandler.router = router
-    APIHandler.static_dir = SCRIPT_DIR / 'static'
-
-    server = HTTPServer(('localhost', port), APIHandler)
-    count = len(_load_adrs())
-    print(json.dumps({"serving": f"http://localhost:{port}", "nodes": count}))
-
-    if open_browser:
-        webbrowser.open(f"http://localhost:{port}")
-
+def detect_project() -> str:
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        server.server_close()
+        url = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        match = re.search(r"[/:]([^/:]+?)(?:\.git)?$", url)
+        if match:
+            return match.group(1)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return Path.cwd().name
+
+
+def cmd_search(args: list[str]):
+    project_filter = None
+    type_filter = None
+    query_parts = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--project" and i + 1 < len(args):
+            project_filter = args[i + 1]
+            i += 2
+        elif args[i] == "--type" and i + 1 < len(args):
+            type_filter = args[i + 1]
+            i += 2
+        else:
+            query_parts.append(args[i])
+            i += 1
+
+    query = " ".join(query_parts)
+    if not query:
+        print(json.dumps({"error": "search requires a query"}))
+        sys.exit(1)
+
+    # Quote each token to prevent FTS5 operator interpretation (e.g. hyphens as NOT)
+    fts_query = " ".join(f'"{token}"' for token in query.split())
+
+    conn = init_db()
+    rows = conn.execute(
+        """SELECT f.id, f.title, f.tags, f.project, rank
+           FROM decisions_fts f
+           WHERE decisions_fts MATCH ?
+           ORDER BY rank""",
+        (fts_query,),
+    ).fetchall()
+
+    results = []
+    for row in rows:
+        rid, title, tags, project, rank = row
+        if project_filter and project_filter.lower() not in (project or "").lower():
+            continue
+        if type_filter:
+            meta = conn.execute(
+                "SELECT type FROM decisions WHERE id = ?", (int(rid),)
+            ).fetchone()
+            if not meta or meta[0] != type_filter:
+                continue
+        results.append({
+            "id": int(rid),
+            "title": title,
+            "tags": tags,
+            "project": project,
+            "rank": rank,
+        })
+
+    conn.close()
+    print(json.dumps({"query": query, "count": len(results), "results": results}))
+
+
+def cmd_graph(args: list[str]):
+    if not args:
+        print(json.dumps({"error": "graph requires a record ID"}))
+        sys.exit(1)
+
+    record_id = int(args[0])
+    conn = init_db()
+
+    visited = set()
+    nodes = []
+    edges = []
+
+    def walk(rid: int, depth: int):
+        if rid in visited or depth > 3:
+            return
+        visited.add(rid)
+        row = conn.execute(
+            "SELECT id, title, type, status, project, tags_json FROM decisions WHERE id = ?",
+            (rid,),
+        ).fetchone()
+        if row:
+            nodes.append({
+                "id": row[0], "title": row[1], "type": row[2],
+                "status": row[3], "project": row[4],
+                "tags": json.loads(row[5] or "[]"),
+            })
+        rels = conn.execute(
+            "SELECT target_id, relation_type FROM relationships WHERE source_id = ?",
+            (rid,),
+        ).fetchall()
+        for target_id, rel_type in rels:
+            edges.append({"source": rid, "target": target_id, "relation": rel_type})
+            if target_id not in visited:
+                walk(target_id, depth + 1)
+
+    walk(record_id, 0)
+    conn.close()
+    print(json.dumps({"root": record_id, "nodes": nodes, "edges": edges}))
+
+
+def cmd_related(args: list[str]):
+    if not args:
+        print(json.dumps({"error": "related requires a record ID"}))
+        sys.exit(1)
+
+    record_id = int(args[0])
+    conn = init_db()
+
+    root = conn.execute(
+        "SELECT id, title, type, status, project, tags_json FROM decisions WHERE id = ?",
+        (record_id,),
+    ).fetchone()
+    if not root:
+        conn.close()
+        print(json.dumps({"error": f"record {record_id} not found"}))
+        sys.exit(1)
+
+    seen_ids = {record_id}
+    results = []
+
+    # Graph neighbors
+    rels = conn.execute(
+        "SELECT target_id, relation_type FROM relationships WHERE source_id = ?",
+        (record_id,),
+    ).fetchall()
+    for target_id, rel_type in rels:
+        if target_id not in seen_ids:
+            seen_ids.add(target_id)
+            row = conn.execute(
+                "SELECT id, title, type, status, project, tags_json FROM decisions WHERE id = ?",
+                (target_id,),
+            ).fetchone()
+            if row:
+                results.append({
+                    "id": row[0], "title": row[1], "type": row[2],
+                    "status": row[3], "project": row[4],
+                    "tags": json.loads(row[5] or "[]"),
+                    "via": rel_type,
+                })
+
+    # Tag-matched records
+    root_tags = json.loads(root[5] or "[]")
+    if root_tags:
+        all_rows = conn.execute(
+            "SELECT id, title, type, status, project, tags_json FROM decisions"
+        ).fetchall()
+        for row in all_rows:
+            if row[0] in seen_ids:
+                continue
+            row_tags = json.loads(row[5] or "[]")
+            shared = set(root_tags) & set(row_tags)
+            if shared:
+                seen_ids.add(row[0])
+                results.append({
+                    "id": row[0], "title": row[1], "type": row[2],
+                    "status": row[3], "project": row[4],
+                    "tags": json.loads(row[5] or "[]"),
+                    "via": f"shared_tags:{','.join(sorted(shared))}",
+                })
+
+    conn.close()
+    print(json.dumps({"root": record_id, "count": len(results), "related": results}))
 
 
 def main():
@@ -349,39 +342,19 @@ def main():
         sys.exit(1)
 
     cmd = sys.argv[1]
+    rest = sys.argv[2:]
     if cmd == "index":
         cmd_index()
-    elif cmd == "search":
-        if len(sys.argv) < 3:
-            print(json.dumps({"error": "usage: search <query>"}))
-            sys.exit(1)
-        cmd_search(" ".join(sys.argv[2:]))
-    elif cmd == "graph":
-        if len(sys.argv) < 3:
-            print(json.dumps({"error": "usage: graph <adr-id>"}))
-            sys.exit(1)
-        cmd_graph(sys.argv[2])
-    elif cmd == "related":
-        if len(sys.argv) < 3:
-            print(json.dumps({"error": "usage: related <adr-id>"}))
-            sys.exit(1)
-        cmd_related(sys.argv[2])
     elif cmd == "next-id":
         cmd_next_id()
-    elif cmd == "serve":
-        port = 8877
-        open_browser = False
-        i = 2
-        while i < len(sys.argv):
-            if sys.argv[i] == "--port" and i + 1 < len(sys.argv):
-                port = int(sys.argv[i + 1])
-                i += 2
-            elif sys.argv[i] == "--open":
-                open_browser = True
-                i += 1
-            else:
-                i += 1
-        cmd_serve(port=port, open_browser=open_browser)
+    elif cmd == "search":
+        cmd_search(rest)
+    elif cmd == "graph":
+        cmd_graph(rest)
+    elif cmd == "related":
+        cmd_related(rest)
+    elif cmd == "detect-project":
+        print(json.dumps({"project": detect_project()}))
     else:
         print(json.dumps({"error": f"unknown command: {cmd}"}))
         sys.exit(1)

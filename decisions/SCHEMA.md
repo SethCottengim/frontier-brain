@@ -1,52 +1,57 @@
-# ADR Schema
+# Record Schema
 
 ## Frontmatter Fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `id` | string | yes | Unique identifier, format `ADR-XXX` (zero-padded 3 digits) |
+| `id` | integer | yes | Global sequential integer (1, 2, 3, ...) |
 | `title` | string | yes | Short descriptive title |
-| `status` | enum | yes | `proposed` \| `accepted` \| `superseded` \| `deprecated` |
-| `date` | date | yes | ISO 8601 date (YYYY-MM-DD) when decision was recorded |
+| `type` | enum | yes | `decision` \| `knowledge` \| `context` |
+| `status` | enum | yes | `active` \| `superseded` \| `deprecated` |
+| `date` | date | yes | ISO 8601 date (YYYY-MM-DD) when recorded |
+| `project` | string | yes | Project scope (e.g., `sempl-core/agents`, `frontier-brain`) |
 | `tags` | list[string] | yes | Topic tags for search (lowercase, hyphenated) |
-| `supersedes` | list[string] | no | ADR IDs this decision replaces |
-| `related` | list[string] | no | ADR IDs topically connected |
-| `project` | string | yes | Project scope (e.g., `frontier-brain`, `sempl-core/agents`) |
+| `affects` | list[string] | no | Paths affected by this record (default `[]`) |
+| `recorded_by` | string | yes | NTID of person who recorded |
+| `supersedes` | list[integer] | no | Record IDs this entry replaces |
+| `related` | list[integer] | no | Record IDs topically connected |
+
+## Record Types
+
+| Type | What | Example |
+|------|------|---------|
+| `context` | Project purpose, goals, constraints | "SEMPL automates ISO 15288 via staged agent pipelines" |
+| `decision` | Choice between alternatives + rationale | "Strands over LangChain — lighter, native Bedrock" |
+| `knowledge` | Validated fact learned through experience | "Unset VPC endpoint env var locally or Bedrock calls fail" |
 
 ## Status Values
 
 | Status | Meaning |
 |--------|---------|
-| `proposed` | Under consideration, not yet accepted |
-| `accepted` | Active decision in effect |
-| `superseded` | Replaced by a newer decision (check `superseded_by` relations) |
+| `active` | Current and in effect |
+| `superseded` | Replaced by a newer record (check `superseded_by` relations) |
 | `deprecated` | No longer relevant, not replaced |
 
 ## Relationship Types
 
 | Relation | Meaning | Auto-Inverse |
 |----------|---------|-------------|
-| `supersedes` | Replaces an older decision | `superseded_by` |
-| `superseded_by` | Was replaced (auto-created) | `supersedes` |
-| `related_to` | Topically connected (bidirectional) | `related_to` |
-| `informs` | Influenced but didn't replace | `informed_by` |
-| `contradicts` | Tension between decisions (bidirectional) | `contradicts` |
-| `refines` | Narrows scope of a broader decision | `refined_by` |
+| `supersedes` | Replaces an older record | `superseded_by` (auto-created) |
+| `related` | Topically connected (bidirectional) | `related` (mirrored) |
 
-## Body Sections
+Only two relationship types. `supersedes` is directional with auto-inverse. `related` is bidirectional.
 
-All sections required. Keep concise — ADRs are for recall, not documentation.
+## Body
 
-- **Context** — Why the decision came up. What problem or question.
-- **Considered Options** — Alternatives with pros/cons. Skip if no alternatives existed.
-- **Decision** — What was chosen and the primary reason.
-- **Consequences** — What changes. Downstream effects.
+Free-text, 2-5 sentences. No mandatory sections. Captures what was chosen/learned and why.
 
 ## Conventions
 
-- IDs are sequential: `ADR-001`, `ADR-002`, etc.
-- File names: `ADR-XXX-slug.md` where slug is kebab-case from title
-- Tags: lowercase, hyphenated (e.g., `state-management`, `agent-framework`)
-- One decision per file
+- IDs are global sequential integers starting at 1
+- Filename format: `NNN-slug.md` (zero-padded 3 digits, e.g., `001-sempl-context.md`)
+- Tags: lowercase, hyphenated (e.g., `agent-framework`, `state-management`)
+- One record per file
 - `supersedes` in frontmatter triggers auto-creation of inverse `superseded_by` relation in graph
-- `related` in frontmatter triggers bidirectional `related_to` relation in graph
+- `related` in frontmatter triggers bidirectional `related` relation in graph
+- Project identified by git remote URL (extract repo name) or directory basename as fallback
+- Storage location: `~/.claude/decisions/` (central, survives project clones/deletes)

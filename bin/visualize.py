@@ -1,76 +1,77 @@
 #!/usr/bin/env python3
 """
 Generate an interactive force-directed graph visualization of the decision knowledge graph.
-Outputs a standalone HTML file using d3-force with Obsidian-style dark theme.
+Reads from brain.db, outputs standalone HTML with inlined d3.
 
 Usage:
-    python bin/visualize.py                    # writes decisions/graph.html
+    python bin/visualize.py                    # writes ~/.claude/decisions/graph.html
     python bin/visualize.py --open             # writes and opens in browser
     python bin/visualize.py -o out.html        # custom output path
 """
 
+import argparse
 import json
-import os
-import sys
+import sqlite3
 import webbrowser
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent
-DECISIONS_DIR = PROJECT_DIR / "decisions"
-
-sys.path.insert(0, str(PROJECT_DIR / "lib"))
-
-import yaml
-from graphdb import GraphDB
+DECISIONS_DIR = Path.home() / ".claude" / "decisions"
+DB_PATH = DECISIONS_DIR / "brain.db"
+D3_PATH = Path(__file__).resolve().parent / "static" / "d3.v7.min.js"
 
 
 def collect_graph_data() -> dict:
-    adrs = []
-    for f in sorted(DECISIONS_DIR.glob("ADR-*.md")):
-        text = f.read_text(encoding="utf-8")
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            continue
-        try:
-            meta = yaml.safe_load(parts[1])
-        except yaml.YAMLError:
-            continue
-        if not meta or "id" not in meta:
-            continue
-        adrs.append(meta)
+    if not DB_PATH.exists():
+        return {"nodes": [], "links": [], "projects": []}
+
+    conn = sqlite3.connect(str(DB_PATH))
+
+    rows = conn.execute(
+        "SELECT id, title, type, status, date, project, tags_json, affects_json, recorded_by FROM decisions"
+    ).fetchall()
 
     nodes = []
-    tag_set = set()
-    for adr in adrs:
-        tags = adr.get("tags", []) or []
-        for t in tags:
-            tag_set.add(t)
+    projects = set()
+    for row in rows:
+        project = row[5] or ""
+        if project:
+            projects.add(project)
         nodes.append({
-            "id": adr["id"],
-            "title": adr.get("title", ""),
-            "status": adr.get("status", "proposed"),
-            "date": str(adr.get("date", "")),
-            "tags": tags,
-            "project": adr.get("project", ""),
-            "file": str(f.name),
+            "id": row[0],
+            "title": row[1],
+            "type": row[2],
+            "status": row[3],
+            "date": row[4] or "",
+            "project": project,
+            "tags": json.loads(row[6] or "[]"),
+            "affects": json.loads(row[7] or "[]"),
+            "recorded_by": row[8] or "",
         })
 
-    graph_path = DECISIONS_DIR / "graph.db"
-    links = []
-    if graph_path.exists():
-        db = GraphDB(str(graph_path))
-        for src, rel, dst in db.list_relations():
-            if rel == "superseded_by" or (rel == "related_to" and src > dst):
-                continue
-            links.append({"source": src, "target": dst, "relation": rel})
-        db.close()
+    rels = conn.execute(
+        "SELECT source_id, target_id, relation_type FROM relationships"
+    ).fetchall()
 
-    return {
-        "nodes": nodes,
-        "links": links,
-        "tags": sorted(tag_set),
-    }
+    seen_edges = set()
+    links = []
+    for src, tgt, rel_type in rels:
+        if rel_type == "superseded_by":
+            continue
+        if rel_type == "related_to" and src > tgt:
+            continue
+        key = (src, tgt, rel_type)
+        if key not in seen_edges:
+            seen_edges.add(key)
+            links.append({"source": src, "target": tgt, "relation": rel_type})
+
+    conn.close()
+    return {"nodes": nodes, "links": links, "projects": sorted(projects)}
+
+
+def load_d3() -> str:
+    if D3_PATH.exists():
+        return D3_PATH.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"Vendored d3 not found at {D3_PATH}. Run from repo or install.")
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -79,31 +80,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Decision Knowledge Graph</title>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <style>
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
   body {
-    background: #060e20;
-    color: #dee5ff;
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
     overflow: hidden;
     height: 100vh;
     width: 100vw;
   }
 
-  /* Animated background canvas */
-  #bg-canvas {
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-  }
-
   #graph-container {
     position: absolute;
     inset: 0;
-    z-index: 1;
   }
 
   svg {
@@ -112,445 +103,510 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     display: block;
   }
 
-  .node-glow { filter: url(#glow); }
+  .link {
+    stroke-opacity: 0.3;
+    stroke-width: 1.2;
+  }
+  .link-supersedes {
+    stroke-dasharray: 6 3;
+  }
 
-  .link { stroke-opacity: 0.25; stroke-width: 1; }
-  .link:hover { stroke-opacity: 0.8; stroke-width: 2; }
-  .link-label { font-size: 9px; fill: rgba(58,223,250,0.5); pointer-events: none; opacity: 0; }
+  .node-shape {
+    cursor: grab;
+    transition: opacity 0.15s;
+  }
+  .node-shape:hover {
+    filter: brightness(1.4);
+  }
 
-  .node-circle { cursor: grab; transition: r 0.2s ease; }
-  .node-circle:hover { filter: brightness(1.4); }
   .node-label {
-    font-size: 11px;
-    fill: #dee5ff;
+    font-size: 10px;
+    fill: #c9d1d9;
     pointer-events: none;
     text-anchor: middle;
-    dominant-baseline: central;
-    text-shadow: 0 0 8px #060e20, 0 0 16px #060e20, 0 0 4px #060e20;
+    dominant-baseline: hanging;
+    text-shadow: 0 0 6px #0d1117, 0 0 12px #0d1117, 0 0 3px #0d1117;
+    opacity: 0;
+    transition: opacity 0.15s;
   }
-  .node-label.highlighted { fill: #fff; font-weight: 600; }
 
-  /* ── Glass card base ── */
-  .glass-dark {
-    position: relative;
-    border-radius: 1rem;
-    background: rgba(15,25,48,0.05);
-    backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(3px);
-    border: 1px solid rgba(255,255,255,0.25);
-    box-shadow:
-      inset 0 1px 2px 0 rgba(255,255,255,0.25),
-      inset 1px 0 2px 0 rgba(255,255,255,0.15),
-      inset 0 -1px 2px 0 rgba(0,0,0,0.35),
-      inset -1px 0 2px 0 rgba(0,0,0,0.25),
-      0 0 20px rgba(255,255,255,0.04),
-      0 4px 6px -1px rgba(0,0,0,0.3),
-      0 8px 20px -2px rgba(0,0,0,0.1),
-      0 0 40px rgba(0,0,0,0.3);
-  }
-  .glass-dark::before {
-    content: '';
-    position: absolute; inset: 0;
-    border-radius: inherit;
-    pointer-events: none; z-index: 0;
-    mask-image: linear-gradient(to right, black 0%, transparent 8%, transparent 92%, black 100%),
-                linear-gradient(to bottom, black 0%, transparent 8%, transparent 92%, black 100%);
-    mask-composite: add;
-    -webkit-mask-image: linear-gradient(to right, black 0%, transparent 8%, transparent 92%, black 100%),
-                        linear-gradient(to bottom, black 0%, transparent 8%, transparent 92%, black 100%);
-    -webkit-mask-composite: source-over;
-    backdrop-filter: blur(10px) brightness(1.8);
-    -webkit-backdrop-filter: blur(10px) brightness(1.8);
-  }
-  .glass-dark::after {
-    content: '';
-    position: absolute; inset: 0;
-    border-radius: inherit;
-    pointer-events: none; z-index: 1;
-    background:
-      linear-gradient(135deg,
-        rgba(255,255,255,0.02) 1%, rgba(255,255,255,0.06) 8%,
-        transparent 35%, transparent 88%, rgba(255,255,255,0.05) 100%),
-      linear-gradient(to right, rgba(255,255,255,0.08) 0%, transparent 2%, transparent 97%, rgba(255,255,255,0.05) 100%),
-      linear-gradient(to bottom, rgba(255,255,255,0.08) 0%, transparent 2%, transparent 97%, rgba(255,255,255,0.03) 100%);
-  }
-  .glass-dark > * { position: relative; z-index: 2; }
-
-  /* ── Info panel ── */
-  #info-panel {
+  /* Tooltip */
+  #tooltip {
     position: fixed;
-    top: 16px;
-    right: 16px;
-    width: 340px;
-    max-height: calc(100vh - 32px);
-    padding: 24px;
-    overflow-y: auto;
     display: none;
-    z-index: 10;
+    padding: 10px 14px;
+    background: rgba(22, 27, 34, 0.95);
+    border: 1px solid rgba(139, 148, 158, 0.3);
+    border-radius: 8px;
+    font-size: 12px;
+    color: #c9d1d9;
+    pointer-events: none;
+    z-index: 100;
+    max-width: 320px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
   }
-  #info-panel.visible { display: block; }
-  #info-panel h2 {
-    font-size: 15px;
-    color: #dee5ff;
-    margin-bottom: 4px;
-    font-weight: 700;
-  }
-  #info-panel .adr-id {
-    font-size: 11px;
-    color: #3adffa;
-    margin-bottom: 12px;
+  #tooltip .tt-title {
     font-weight: 600;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
+    font-size: 13px;
+    color: #f0f6fc;
+    margin-bottom: 4px;
   }
-  #info-panel .meta-row {
+  #tooltip .tt-id {
+    font-size: 10px;
+    color: #58a6ff;
+    letter-spacing: 0.1em;
+    margin-bottom: 6px;
+  }
+  #tooltip .tt-row {
     display: flex;
     justify-content: space-between;
-    font-size: 12px;
-    padding: 4px 0;
-    border-bottom: 1px solid rgba(255,255,255,0.06);
+    padding: 2px 0;
+    gap: 12px;
   }
-  #info-panel .meta-label { color: rgba(222,229,255,0.4); }
-  #info-panel .meta-value { color: #dee5ff; font-weight: 500; }
-  #info-panel .tag {
+  #tooltip .tt-label { color: #8b949e; }
+  #tooltip .tt-value { color: #c9d1d9; font-weight: 500; }
+  #tooltip .tt-tag {
     display: inline-block;
-    background: rgba(58,223,250,0.08);
-    color: #9bffce;
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 10px;
-    margin: 2px 3px 2px 0;
-  }
-  #info-panel .tags-row { margin-top: 10px; }
-  #info-panel .connections { margin-top: 14px; font-size: 12px; }
-  #info-panel .connections h3 {
+    background: rgba(88, 166, 255, 0.1);
+    color: #58a6ff;
     font-size: 10px;
-    color: #3adffa;
-    margin-bottom: 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.2em;
-    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 8px;
+    margin: 1px 2px 1px 0;
   }
-  #info-panel .conn-item { padding: 3px 0; color: #dee5ff; cursor: pointer; }
-  #info-panel .conn-item:hover { color: #3adffa; text-decoration: underline; }
-  #info-panel .conn-rel { color: rgba(222,229,255,0.4); font-size: 10px; margin-right: 6px; }
-  #info-panel .close-btn {
-    position: absolute; top: 16px; right: 18px;
-    background: none; border: none;
-    color: rgba(222,229,255,0.4); font-size: 18px;
-    cursor: pointer; line-height: 1; z-index: 3;
-  }
-  #info-panel .close-btn:hover { color: #3adffa; }
 
-  .status-badge {
-    display: inline-block; font-size: 10px;
-    padding: 2px 8px; border-radius: 8px;
-    font-weight: 600; letter-spacing: 0.3px;
-  }
-  .status-accepted { background: rgba(155,255,206,0.12); color: #9bffce; }
-  .status-proposed { background: rgba(58,223,250,0.12); color: #3adffa; }
-  .status-superseded { background: rgba(200,120,80,0.12); color: #c87850; }
-  .status-deprecated { background: rgba(150,150,150,0.12); color: #999; }
-
-  /* ── Legend ── */
-  #legend {
-    position: fixed;
-    bottom: 16px;
-    left: 16px;
-    padding: 14px 18px;
-    z-index: 10;
-    font-size: 11px;
-  }
-  #legend h4 {
-    font-size: 10px;
-    color: #3adffa;
-    text-transform: uppercase;
-    letter-spacing: 0.2em;
-    margin-bottom: 8px;
-    font-weight: 700;
-  }
-  .legend-item {
-    display: flex; align-items: center;
-    gap: 8px; padding: 2px 0;
-    color: rgba(222,229,255,0.6);
-  }
-  .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .legend-line { width: 20px; height: 2px; flex-shrink: 0; border-radius: 1px; }
-
-  /* ── Title ── */
+  /* Title + count */
   #title {
     position: fixed;
     top: 16px;
     left: 16px;
     z-index: 10;
     font-size: 13px;
-    color: rgba(222,229,255,0.5);
+    color: rgba(201,209,217,0.5);
     font-weight: 600;
     letter-spacing: 0.5px;
   }
-  #title span { color: #3adffa; }
+  #title span { color: #58a6ff; }
   #node-count {
     font-size: 11px;
-    color: rgba(155,255,206,0.4);
+    color: rgba(201,209,217,0.3);
     margin-top: 4px;
+  }
+
+  /* Info panel */
+  #info-panel {
+    position: relative;
+    max-height: 55vh;
+    padding: 20px;
+    overflow-y: auto;
+    display: none;
+    background: rgba(22, 27, 34, 0.92);
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 12px;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  #info-panel.visible { display: block; }
+  #info-panel h2 {
+    font-size: 14px;
+    color: #f0f6fc;
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+  #info-panel .panel-id {
+    font-size: 10px;
+    color: #58a6ff;
+    margin-bottom: 10px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+  }
+  #info-panel .meta-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(139,148,158,0.1);
+  }
+  #info-panel .meta-label { color: #8b949e; }
+  #info-panel .meta-value { color: #c9d1d9; font-weight: 500; }
+  #info-panel .tag {
+    display: inline-block;
+    background: rgba(88, 166, 255, 0.1);
+    color: #58a6ff;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 8px;
+    margin: 2px 3px 2px 0;
+  }
+  #info-panel .tags-row { margin-top: 8px; }
+  #info-panel .connections { margin-top: 12px; font-size: 12px; }
+  #info-panel .connections h3 {
+    font-size: 10px;
+    color: #58a6ff;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    font-weight: 600;
+  }
+  #info-panel .conn-item {
+    padding: 3px 0;
+    color: #c9d1d9;
+    cursor: pointer;
+  }
+  #info-panel .conn-item:hover { color: #58a6ff; }
+  #info-panel .conn-rel {
+    color: #8b949e;
+    font-size: 10px;
+    margin-right: 6px;
+  }
+  #info-panel .close-btn {
+    position: absolute; top: 14px; right: 16px;
+    background: none; border: none;
+    color: #8b949e; font-size: 18px;
+    cursor: pointer; line-height: 1;
+  }
+  #info-panel .close-btn:hover { color: #58a6ff; }
+
+  .type-badge {
+    display: inline-block; font-size: 10px;
+    padding: 2px 8px; border-radius: 8px;
+    font-weight: 600; letter-spacing: 0.3px;
+  }
+  .type-decision { background: rgba(88,166,255,0.12); color: #58a6ff; }
+  .type-knowledge { background: rgba(210,153,34,0.12); color: #d29922; }
+  .type-context { background: rgba(63,185,80,0.12); color: #3fb950; }
+
+  /* Right column: legend + info panel */
+  #right-column {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: calc(100vh - 32px);
+    width: 280px;
+    pointer-events: none;
+  }
+  #right-column > * { pointer-events: auto; }
+
+  /* Legend panel */
+  #legend {
+    background: rgba(22, 27, 34, 0.88);
+    border: 1px solid rgba(139, 148, 158, 0.15);
+    border-radius: 10px;
+    padding: 12px 14px;
+    backdrop-filter: blur(12px);
+    font-size: 11px;
+  }
+  #legend h3 {
+    font-size: 9px;
+    color: #58a6ff;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    font-weight: 600;
+    margin-bottom: 5px;
+    margin-top: 8px;
+  }
+  #legend h3:first-child { margin-top: 0; }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 1.5px 0;
+    color: #c9d1d9;
+    font-size: 11px;
+  }
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .legend-shape {
+    width: 14px;
+    text-align: center;
+    flex-shrink: 0;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .legend-line {
+    display: inline-block;
+    width: 20px;
+    height: 0;
+    border-top: 2px solid #8b949e;
+    vertical-align: middle;
+    flex-shrink: 0;
+  }
+  .legend-line-dashed {
+    border-top-style: dashed;
+    border-top-color: #f85149;
+  }
+
+  /* Filter sidebar */
+  #filter-sidebar {
+    position: fixed;
+    top: 70px;
+    left: 0;
+    z-index: 10;
+    background: rgba(22, 27, 34, 0.92);
+    border: 1px solid rgba(139, 148, 158, 0.15);
+    border-left: none;
+    border-radius: 0 10px 10px 0;
+    padding: 12px 14px 12px 12px;
+    backdrop-filter: blur(12px);
+    font-size: 11px;
+    max-height: calc(100vh - 86px);
+    overflow-y: auto;
+    transition: transform 0.3s ease;
+    min-width: 170px;
+  }
+  #filter-sidebar.collapsed {
+    transform: translateX(calc(-100% + 28px));
+  }
+  #filter-sidebar.collapsed .filter-content {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+  }
+  .filter-content {
+    opacity: 1;
+    transition: opacity 0.2s ease 0.1s;
+  }
+  #filter-toggle {
+    position: absolute;
+    top: 8px;
+    right: 6px;
+    background: none;
+    border: none;
+    color: #8b949e;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 2px 4px;
+    line-height: 1;
+    z-index: 1;
+  }
+  #filter-toggle:hover { color: #58a6ff; }
+  .filter-section h4 {
+    font-size: 9px;
+    color: #58a6ff;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    font-weight: 600;
+    margin-bottom: 4px;
+    margin-top: 10px;
+  }
+  .filter-section:first-child h4 { margin-top: 0; }
+  .filter-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .filter-actions button {
+    background: none;
+    border: none;
+    color: #58a6ff;
+    font-size: 10px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .filter-actions button:hover { color: #79c0ff; }
+  .filter-cb {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    cursor: pointer;
+    color: #c9d1d9;
+    font-size: 11px;
+  }
+  .filter-cb input[type="checkbox"] {
+    accent-color: #58a6ff;
+    cursor: pointer;
+    margin: 0;
+  }
+  .filter-cb .cb-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
   }
 </style>
 </head>
 <body>
-
-<canvas id="bg-canvas"></canvas>
 
 <div id="title">
   <span>&#9670;</span> Decision Knowledge Graph
   <div id="node-count"></div>
 </div>
 
+<div id="tooltip"></div>
+
+<div id="filter-sidebar">
+  <button id="filter-toggle" onclick="toggleFilter()">&#9666;</button>
+  <div class="filter-content" id="filter-content"></div>
+</div>
+
 <div id="graph-container">
   <svg id="graph-svg">
     <defs>
       <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-        <feGaussianBlur stdDeviation="4" result="blur"/>
+        <feGaussianBlur stdDeviation="3" result="blur"/>
         <feComposite in="SourceGraphic" in2="blur" operator="over"/>
       </filter>
       <marker id="arrow-supersedes" viewBox="0 0 10 6" refX="10" refY="3"
               markerWidth="8" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,3 L0,6" fill="#c87850" opacity="0.5"/>
-      </marker>
-      <marker id="arrow-informs" viewBox="0 0 10 6" refX="10" refY="3"
-              markerWidth="8" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,3 L0,6" fill="#3adffa" opacity="0.5"/>
-      </marker>
-      <marker id="arrow-refines" viewBox="0 0 10 6" refX="10" refY="3"
-              markerWidth="8" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,3 L0,6" fill="#c180ff" opacity="0.5"/>
+        <path d="M0,0 L10,3 L0,6" fill="#f85149" opacity="0.6"/>
       </marker>
     </defs>
   </svg>
 </div>
 
-<div id="info-panel" class="glass-dark">
-  <button class="close-btn" onclick="closePanel()">&times;</button>
-  <div id="panel-content"></div>
+<div id="right-column">
+  <div id="legend"></div>
+  <div id="info-panel">
+    <button class="close-btn" onclick="closePanel()">&times;</button>
+    <div id="panel-content"></div>
+  </div>
 </div>
 
-<div id="legend" class="glass-dark">
-  <h4>Relations</h4>
-  <div class="legend-item"><div class="legend-line" style="background:#c87850"></div> supersedes</div>
-  <div class="legend-item"><div class="legend-line" style="background:#3adffa"></div> informs</div>
-  <div class="legend-item"><div class="legend-line" style="background:#9bffce"></div> related_to</div>
-  <div class="legend-item"><div class="legend-line" style="background:#c180ff"></div> refines</div>
-  <div class="legend-item"><div class="legend-line" style="background:#e05555"></div> contradicts</div>
-</div>
-
-<!-- Animated background -->
 <script>
-(function(){
-  const cv = document.getElementById('bg-canvas');
-  const cx = cv.getContext('2d');
-  let W, H;
-
-  const COLORS = [{r:58,g:223,b:250},{r:193,g:128,b:255},{r:155,g:255,b:206}];
-
-  const orbs = [];
-  for(let i=0;i<4;i++){
-    orbs.push({
-      x:Math.random(), y:Math.random(),
-      vx:(Math.random()-0.5)*0.0003, vy:(Math.random()-0.5)*0.0003,
-      rad:0.18+Math.random()*0.2,
-      col:COLORS[i%COLORS.length],
-      opacity:0.07+Math.random()*0.05,
-    });
-  }
-
-  function resize(){
-    const dpr=window.devicePixelRatio||1;
-    W=window.innerWidth; H=window.innerHeight;
-    cv.width=W*dpr; cv.height=H*dpr;
-    cv.style.width=W+'px'; cv.style.height=H+'px';
-    cx.setTransform(dpr,0,0,dpr,0,0);
-  }
-  resize();
-  window.addEventListener('resize',resize);
-
-  function frame(){
-    cx.clearRect(0,0,W,H);
-    orbs.forEach(o=>{
-      o.x+=o.vx; o.y+=o.vy;
-      if(o.x<-0.2||o.x>1.2) o.vx*=-1;
-      if(o.y<-0.2||o.y>1.2) o.vy*=-1;
-      const r=o.rad*Math.max(W,H);
-      const g=cx.createRadialGradient(o.x*W,o.y*H,0,o.x*W,o.y*H,r);
-      g.addColorStop(0,`rgba(${o.col.r},${o.col.g},${o.col.b},${o.opacity})`);
-      g.addColorStop(1,`rgba(${o.col.r},${o.col.g},${o.col.b},0)`);
-      cx.fillStyle=g;
-      cx.fillRect(o.x*W-r,o.y*H-r,r*2,r*2);
-    });
-    requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
-})();
+__D3_INLINE__
 </script>
-
-<script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const DATA = __GRAPH_DATA__;
 
-const RELATION_COLORS = {
-  supersedes: '#c87850',
-  related_to: '#9bffce',
-  informs: '#3adffa',
-  contradicts: '#e05555',
-  refines: '#c180ff',
-};
-
-const STATUS_COLORS = {
-  accepted: '#9bffce',
-  proposed: '#3adffa',
-  superseded: '#c87850',
-  deprecated: '#666',
-};
-
-const TAG_PALETTE = [
-  '#3adffa', '#c180ff', '#9bffce', '#ffa94d', '#ff7ab8',
-  '#4dc9f6', '#a78bfa', '#50c878', '#f67019', '#acc236',
+const PROJECT_PALETTE = [
+  '#58a6ff', '#f0883e', '#a371f7', '#3fb950', '#f778ba',
+  '#d29922', '#79c0ff', '#56d4dd', '#db61a2', '#7ee787',
+  '#e3b341', '#bc8cff', '#ff7b72', '#ffa657', '#d2a8ff',
 ];
 
-const tagColorMap = {};
-DATA.tags.forEach((tag, i) => {
-  tagColorMap[tag] = TAG_PALETTE[i % TAG_PALETTE.length];
+const projectColorMap = {};
+DATA.projects.forEach((p, i) => {
+  projectColorMap[p] = PROJECT_PALETTE[i % PROJECT_PALETTE.length];
 });
 
-function primaryTagColor(node) {
-  if (node.tags && node.tags.length > 0) {
-    return tagColorMap[node.tags[0]] || '#7a7aff';
-  }
-  return '#7a7aff';
+function projectColor(d) {
+  return projectColorMap[d.project] || '#8b949e';
 }
 
-// Connection count for node sizing
+const RELATION_COLORS = {
+  supersedes: '#f85149',
+  related_to: '#8b949e',
+};
+
+// Custom hexagon symbol for context type
+const hexagonSymbol = {
+  draw(ctx, size) {
+    const r = Math.sqrt(size / (1.5 * Math.sqrt(3)));
+    const step = Math.PI / 3;
+    ctx.moveTo(r, 0);
+    for (let i = 1; i < 6; i++) {
+      ctx.lineTo(r * Math.cos(step * i), r * Math.sin(step * i));
+    }
+    ctx.closePath();
+  }
+};
+
+const SHAPE_TYPE = {
+  decision:  d3.symbolCircle,
+  knowledge: d3.symbolDiamond,
+  context:   hexagonSymbol,
+};
+
+// Connection count for sizing
 const connectionCount = {};
 DATA.nodes.forEach(n => connectionCount[n.id] = 0);
 DATA.links.forEach(l => {
-  const src = typeof l.source === 'object' ? l.source.id : l.source;
-  const dst = typeof l.target === 'object' ? l.target.id : l.target;
-  connectionCount[src] = (connectionCount[src] || 0) + 1;
-  connectionCount[dst] = (connectionCount[dst] || 0) + 1;
+  connectionCount[l.source] = (connectionCount[l.source] || 0) + 1;
+  connectionCount[l.target] = (connectionCount[l.target] || 0) + 1;
 });
 
+function nodeSize(d) {
+  const count = connectionCount[d.id] || 0;
+  return 40 + count * 15;
+}
+
+DATA.nodes.forEach(n => { n._visible = true; });
+DATA.links.forEach(l => { l._visible = true; });
+let currentHighlight = null;
+
 document.getElementById('node-count').textContent =
-  DATA.nodes.length + ' decisions · ' + DATA.links.length + ' connections';
+  DATA.nodes.length + ' records \\u00b7 ' + DATA.links.length + ' connections';
 
 const svg = d3.select('#graph-svg');
 const container = svg.append('g');
 
-// Zoom
 const zoom = d3.zoom()
-  .scaleExtent([0.2, 5])
+  .scaleExtent([0.15, 6])
   .on('zoom', (event) => container.attr('transform', event.transform));
 svg.call(zoom);
 
 const width = window.innerWidth;
 const height = window.innerHeight;
+svg.call(zoom.transform, d3.zoomIdentity.translate(width / 2, height / 2));
 
-// Center initially
-svg.call(zoom.transform, d3.zoomIdentity.translate(width/2, height/2));
-
-// Tag clustering: nudge same-tag nodes toward shared centroid (gentle, inside sphere)
-function tagCluster(alpha) {
-  const centroids = {};
-  const counts = {};
-  DATA.nodes.forEach(d => {
-    const tag = (d.tags && d.tags[0]) || '__none__';
-    if (!centroids[tag]) { centroids[tag] = {x: 0, y: 0}; counts[tag] = 0; }
-    centroids[tag].x += d.x || 0;
-    centroids[tag].y += d.y || 0;
-    counts[tag]++;
-  });
-  for (const tag in centroids) {
-    centroids[tag].x /= counts[tag];
-    centroids[tag].y /= counts[tag];
-  }
-  const strength = 0.02 * alpha;
-  DATA.nodes.forEach(d => {
-    const tag = (d.tags && d.tags[0]) || '__none__';
-    const c = centroids[tag];
-    d.vx += (c.x - d.x) * strength;
-    d.vy += (c.y - d.y) * strength;
-  });
-}
-
-// Force simulation — scales with node count
 const nodeCount = DATA.nodes.length;
-const baseRadius = Math.max(80, Math.sqrt(nodeCount) * 18);
-const chargeStr = nodeCount > 500 ? -40 : nodeCount > 100 ? -100 : -200;
-const linkDist = nodeCount > 500 ? 25 : nodeCount > 100 ? 45 : 80;
+const chargeStr = nodeCount > 200 ? -60 : nodeCount > 50 ? -120 : -200;
+const linkDist = nodeCount > 200 ? 40 : nodeCount > 50 ? 60 : 90;
 
 const simulation = d3.forceSimulation(DATA.nodes)
   .force('link', d3.forceLink(DATA.links).id(d => d.id).distance(linkDist).strength(0.4))
-  .force('charge', d3.forceManyBody().strength(chargeStr).distanceMax(baseRadius * 1.5))
+  .force('charge', d3.forceManyBody().strength(chargeStr))
   .force('center', d3.forceCenter(0, 0).strength(0.1))
-  .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 2).strength(0.6))
-  .force('tagCluster', tagCluster)
+  .force('collision', d3.forceCollide().radius(d => Math.sqrt(nodeSize(d) / Math.PI) + 4).strength(0.6))
   .alphaDecay(0.025)
   .velocityDecay(0.4);
-
-function nodeRadius(d) {
-  const count = connectionCount[d.id] || 0;
-  return Math.min(2 + count * 0.3, 6);
-}
 
 // Links
 const linkGroup = container.append('g');
 const link = linkGroup.selectAll('line')
   .data(DATA.links)
   .join('line')
-  .attr('class', 'link')
-  .attr('stroke', d => RELATION_COLORS[d.relation] || '#444')
-  .attr('marker-end', d => {
-    if (d.relation === 'supersedes') return 'url(#arrow-supersedes)';
-    if (d.relation === 'informs') return 'url(#arrow-informs)';
-    if (d.relation === 'refines') return 'url(#arrow-refines)';
-    return null;
-  });
+  .attr('class', d => 'link' + (d.relation === 'supersedes' ? ' link-supersedes' : ''))
+  .attr('stroke', d => RELATION_COLORS[d.relation] || '#8b949e')
+  .attr('marker-end', d => d.relation === 'supersedes' ? 'url(#arrow-supersedes)' : null);
 
-// Link labels (hidden until hover)
-const linkLabels = linkGroup.selectAll('text')
-  .data(DATA.links)
-  .join('text')
-  .attr('class', 'link-label')
-  .text(d => d.relation);
-
-// Node groups
+// Nodes
 const nodeGroup = container.append('g');
 const node = nodeGroup.selectAll('g')
   .data(DATA.nodes)
   .join('g')
   .attr('class', 'node-group');
 
-// Glow circle (behind main circle)
-node.append('circle')
-  .attr('r', d => nodeRadius(d) + 4)
-  .attr('fill', d => primaryTagColor(d))
-  .attr('opacity', 0.15)
-  .attr('class', 'node-glow');
+// Glow behind shape
+node.append('path')
+  .attr('d', d => {
+    const sym = SHAPE_TYPE[d.type] || d3.symbolCircle;
+    return d3.symbol().type(sym).size(nodeSize(d) * 3)();
+  })
+  .attr('fill', d => projectColor(d))
+  .attr('opacity', 0.12)
+  .attr('filter', 'url(#glow)');
 
-// Main circle
-node.append('circle')
-  .attr('r', d => nodeRadius(d))
-  .attr('fill', d => primaryTagColor(d))
+// Main shape
+node.append('path')
+  .attr('d', d => {
+    const sym = SHAPE_TYPE[d.type] || d3.symbolCircle;
+    return d3.symbol().type(sym).size(nodeSize(d))();
+  })
+  .attr('fill', d => projectColor(d))
   .attr('opacity', 0.85)
-  .attr('class', 'node-circle')
-  .attr('stroke', d => primaryTagColor(d))
-  .attr('stroke-width', 1.5)
-  .attr('stroke-opacity', 0.4);
+  .attr('stroke', d => projectColor(d))
+  .attr('stroke-width', 1.2)
+  .attr('stroke-opacity', 0.4)
+  .attr('class', 'node-shape');
 
-// Labels — hidden by default, shown on hover
+// Labels
 node.append('text')
   .attr('class', 'node-label')
-  .attr('dy', d => nodeRadius(d) + 10)
-  .attr('opacity', 0)
-  .text(d => d.id);
+  .attr('dy', d => Math.sqrt(nodeSize(d) / Math.PI) + 12)
+  .text(d => d.title.length > 30 ? d.title.slice(0, 28) + '\\u2026' : d.title);
 
-// Drag behavior
+// Drag
 node.call(d3.drag()
   .on('start', (event, d) => {
     if (!event.active) simulation.alphaTarget(0.1).restart();
@@ -565,35 +621,49 @@ node.call(d3.drag()
   })
 );
 
-// Click to show info
+// Tooltip
+const tooltip = document.getElementById('tooltip');
+
+node.on('mouseenter', (event, d) => {
+  highlightNode(d);
+  let html = `<div class="tt-id">#${d.id} &middot; ${d.type}</div>`;
+  html += `<div class="tt-title">${d.title}</div>`;
+  html += `<div class="tt-row"><span class="tt-label">Project</span><span class="tt-value">${d.project || 'none'}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-label">Status</span><span class="tt-value">${d.status}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-label">Date</span><span class="tt-value">${d.date}</span></div>`;
+  if (d.recorded_by) {
+    html += `<div class="tt-row"><span class="tt-label">By</span><span class="tt-value">${d.recorded_by}</span></div>`;
+  }
+  if (d.tags && d.tags.length) {
+    html += '<div style="margin-top:4px">' + d.tags.map(t => `<span class="tt-tag">${t}</span>`).join('') + '</div>';
+  }
+  tooltip.innerHTML = html;
+  tooltip.style.display = 'block';
+  tooltip.style.left = (event.clientX + 14) + 'px';
+  tooltip.style.top = (event.clientY - 10) + 'px';
+}).on('mousemove', (event) => {
+  tooltip.style.left = (event.clientX + 14) + 'px';
+  tooltip.style.top = (event.clientY - 10) + 'px';
+}).on('mouseleave', () => {
+  tooltip.style.display = 'none';
+  if (!document.getElementById('info-panel').classList.contains('visible')) {
+    clearHighlight();
+  }
+});
+
+// Click for info panel
 node.on('click', (event, d) => {
   event.stopPropagation();
   showPanel(d);
   highlightNode(d);
 });
-
 svg.on('click', () => {
   closePanel();
   clearHighlight();
 });
 
-// Hover effects
-node.on('mouseenter', (event, d) => {
-  highlightNode(d);
-  // Show connected link labels
-  linkLabels.attr('opacity', l => {
-    const sid = typeof l.source === 'object' ? l.source.id : l.source;
-    const tid = typeof l.target === 'object' ? l.target.id : l.target;
-    return (sid === d.id || tid === d.id) ? 0.8 : 0;
-  });
-}).on('mouseleave', () => {
-  if (!document.getElementById('info-panel').classList.contains('visible')) {
-    clearHighlight();
-  }
-  linkLabels.attr('opacity', 0);
-});
-
 function highlightNode(d) {
+  currentHighlight = d;
   const connected = new Set();
   DATA.links.forEach(l => {
     const sid = typeof l.source === 'object' ? l.source.id : l.source;
@@ -603,31 +673,28 @@ function highlightNode(d) {
   });
   connected.add(d.id);
 
-  node.select('.node-circle')
-    .attr('opacity', n => connected.has(n.id) ? 1 : 0.15);
-  node.select('.node-glow')
-    .attr('opacity', n => connected.has(n.id) ? 0.25 : 0.03);
+  node.select('.node-shape')
+    .attr('opacity', n => connected.has(n.id) ? 1 : 0.12);
   node.select('.node-label')
-    .attr('opacity', n => connected.has(n.id) ? 0.9 : 0)
-    .attr('fill', n => connected.has(n.id) ? '#dee5ff' : '#1a2030')
-    .classed('highlighted', n => n.id === d.id);
+    .attr('opacity', n => connected.has(n.id) ? 0.9 : 0);
 
   link.attr('stroke-opacity', l => {
+    if (!l._visible) return 0;
     const sid = typeof l.source === 'object' ? l.source.id : l.source;
     const tid = typeof l.target === 'object' ? l.target.id : l.target;
     return (sid === d.id || tid === d.id) ? 0.7 : 0.05;
   }).attr('stroke-width', l => {
     const sid = typeof l.source === 'object' ? l.source.id : l.source;
     const tid = typeof l.target === 'object' ? l.target.id : l.target;
-    return (sid === d.id || tid === d.id) ? 2 : 1;
+    return (sid === d.id || tid === d.id) ? 2 : 1.2;
   });
 }
 
 function clearHighlight() {
-  node.select('.node-circle').attr('opacity', 0.85);
-  node.select('.node-glow').attr('opacity', 0.15);
-  node.select('.node-label').attr('opacity', 0).attr('fill', '#dee5ff').classed('highlighted', false);
-  link.attr('stroke-opacity', 0.25).attr('stroke-width', 1);
+  currentHighlight = null;
+  node.select('.node-shape').attr('opacity', d => d._visible ? 0.85 : 0);
+  node.select('.node-label').attr('opacity', 0);
+  link.attr('stroke-opacity', l => l._visible ? 0.3 : 0).attr('stroke-width', 1.2);
 }
 
 function showPanel(d) {
@@ -640,27 +707,35 @@ function showPanel(d) {
     if (tid === d.id) connected.push({ id: sid, relation: l.relation, dir: 'in' });
   });
 
-  const statusClass = 'status-' + (d.status || 'proposed');
+  const typeClass = 'type-' + (d.type || 'decision');
   let html = `
-    <div class="adr-id">${d.id}</div>
+    <div class="panel-id">#${d.id}</div>
     <h2>${d.title}</h2>
-    <div style="margin: 8px 0">
-      <span class="status-badge ${statusClass}">${d.status}</span>
+    <div style="margin: 6px 0">
+      <span class="type-badge ${typeClass}">${d.type}</span>
     </div>
+    <div class="meta-row"><span class="meta-label">Status</span><span class="meta-value">${d.status}</span></div>
     <div class="meta-row"><span class="meta-label">Date</span><span class="meta-value">${d.date}</span></div>
-    <div class="meta-row"><span class="meta-label">Project</span><span class="meta-value">${d.project}</span></div>
-    <div class="tags-row">${(d.tags||[]).map(t =>
-      '<span class="tag" style="border-left:2px solid '+( tagColorMap[t]||'#7a7aff' )+'">'+t+'</span>'
-    ).join('')}</div>
+    <div class="meta-row"><span class="meta-label">Project</span><span class="meta-value">${d.project || 'none'}</span></div>
+    <div class="meta-row"><span class="meta-label">Recorded by</span><span class="meta-value">${d.recorded_by || 'unknown'}</span></div>
   `;
+
+  if (d.tags && d.tags.length) {
+    html += '<div class="tags-row">' + d.tags.map(t => `<span class="tag">${t}</span>`).join('') + '</div>';
+  }
+  if (d.affects && d.affects.length) {
+    html += `<div class="meta-row"><span class="meta-label">Affects</span><span class="meta-value">${d.affects.join(', ')}</span></div>`;
+  }
 
   if (connected.length > 0) {
     html += '<div class="connections"><h3>Connections</h3>';
     connected.forEach(c => {
-      const relColor = RELATION_COLORS[c.relation] || '#666';
+      const relColor = RELATION_COLORS[c.relation] || '#8b949e';
       const arrow = c.dir === 'out' ? '&rarr;' : '&larr;';
-      html += `<div class="conn-item" onclick="focusNode('${c.id}')">
-        <span class="conn-rel" style="color:${relColor}">${c.relation} ${arrow}</span> ${c.id}
+      const target = DATA.nodes.find(n => n.id === c.id);
+      const label = target ? target.title : '#' + c.id;
+      html += `<div class="conn-item" onclick="focusNode(${c.id})">
+        <span class="conn-rel" style="color:${relColor}">${c.relation} ${arrow}</span> ${label}
       </div>`;
     });
     html += '</div>';
@@ -682,7 +757,98 @@ function focusNode(id) {
   }
 }
 
-// Tick
+// Legend panel
+(function buildLegend() {
+  const el = document.getElementById('legend');
+  let h = '<h3>Projects</h3>';
+  DATA.projects.forEach(p => {
+    h += '<div class="legend-item"><span class="legend-dot" style="background:' + (projectColorMap[p] || '#8b949e') + '"></span>' + p + '</div>';
+  });
+  if (DATA.nodes.some(n => !n.project)) {
+    h += '<div class="legend-item"><span class="legend-dot" style="background:#8b949e"></span><em>none</em></div>';
+  }
+  h += '<h3>Types</h3>';
+  h += '<div class="legend-item"><span class="legend-shape">&#9679;</span>decision</div>';
+  h += '<div class="legend-item"><span class="legend-shape">&#9670;</span>knowledge</div>';
+  h += '<div class="legend-item"><span class="legend-shape">&#11041;</span>context</div>';
+  h += '<h3>Edges</h3>';
+  h += '<div class="legend-item"><span class="legend-line"></span>related</div>';
+  h += '<div class="legend-item"><span class="legend-line legend-line-dashed"></span>supersedes</div>';
+  el.innerHTML = h;
+})();
+
+// Filter sidebar
+const allProjects = [...DATA.projects];
+if (DATA.nodes.some(n => !n.project)) allProjects.push('');
+const allTypes = ['decision', 'knowledge', 'context'];
+const activeProjects = new Set(allProjects);
+const activeTypes = new Set(allTypes);
+
+(function buildFilters() {
+  const el = document.getElementById('filter-content');
+  const icons = { decision: '&#9679;', knowledge: '&#9670;', context: '&#11041;' };
+  let h = '<div class="filter-section"><h4>Projects</h4>';
+  h += '<div class="filter-actions"><button onclick="toggleAll(\'project\',true)">All</button><button onclick="toggleAll(\'project\',false)">None</button></div>';
+  allProjects.forEach(p => {
+    const c = projectColorMap[p] || '#8b949e';
+    h += '<label class="filter-cb"><input type="checkbox" checked data-filter="project" data-value="' + p + '"><span class="cb-dot" style="background:' + c + '"></span>' + (p || '<em>none</em>') + '</label>';
+  });
+  h += '</div><div class="filter-section"><h4>Types</h4>';
+  h += '<div class="filter-actions"><button onclick="toggleAll(\'type\',true)">All</button><button onclick="toggleAll(\'type\',false)">None</button></div>';
+  allTypes.forEach(t => {
+    h += '<label class="filter-cb"><input type="checkbox" checked data-filter="type" data-value="' + t + '"><span style="width:14px;text-align:center;font-size:11px">' + icons[t] + '</span>' + t + '</label>';
+  });
+  h += '</div>';
+  el.innerHTML = h;
+  el.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.addEventListener('change', onFilterChange));
+})();
+
+function onFilterChange(e) {
+  const cb = e.target;
+  const set = cb.dataset.filter === 'project' ? activeProjects : activeTypes;
+  if (cb.checked) set.add(cb.dataset.value); else set.delete(cb.dataset.value);
+  applyFilters();
+}
+function toggleAll(kind, on) {
+  const set = kind === 'project' ? activeProjects : activeTypes;
+  const vals = kind === 'project' ? allProjects : allTypes;
+  set.clear(); if (on) vals.forEach(v => set.add(v));
+  document.querySelectorAll('input[data-filter="' + kind + '"]').forEach(cb => { cb.checked = on; });
+  applyFilters();
+}
+function toggleFilter() {
+  const sb = document.getElementById('filter-sidebar');
+  sb.classList.toggle('collapsed');
+  document.getElementById('filter-toggle').innerHTML = sb.classList.contains('collapsed') ? '&#9776;' : '&#9666;';
+}
+function isNodeVisible(d) {
+  return activeProjects.has(d.project || '') && activeTypes.has(d.type);
+}
+function applyFilters() {
+  const visibleIds = new Set();
+  DATA.nodes.forEach(n => { n._visible = isNodeVisible(n); if (n._visible) visibleIds.add(n.id); });
+  DATA.links.forEach(l => {
+    const sid = typeof l.source === 'object' ? l.source.id : l.source;
+    const tid = typeof l.target === 'object' ? l.target.id : l.target;
+    l._visible = visibleIds.has(sid) && visibleIds.has(tid);
+  });
+  node.transition().duration(300)
+    .style('opacity', d => d._visible ? 1 : 0)
+    .style('pointer-events', d => d._visible ? 'all' : 'none');
+  link.transition().duration(300)
+    .attr('stroke-opacity', l => l._visible ? 0.3 : 0);
+  if (currentHighlight && !currentHighlight._visible) {
+    closePanel(); currentHighlight = null;
+  } else if (currentHighlight) {
+    highlightNode(currentHighlight);
+  }
+  const vis = visibleIds.size, total = DATA.nodes.length;
+  document.getElementById('node-count').textContent =
+    vis === total ? total + ' records \\u00b7 ' + DATA.links.length + ' connections'
+                  : 'showing ' + vis + ' of ' + total + ' records';
+  simulation.alpha(0.3).restart();
+}
+
 simulation.on('tick', () => {
   link
     .attr('x1', d => d.source.x)
@@ -690,14 +856,9 @@ simulation.on('tick', () => {
     .attr('x2', d => d.target.x)
     .attr('y2', d => d.target.y);
 
-  linkLabels
-    .attr('x', d => (d.source.x + d.target.x) / 2)
-    .attr('y', d => (d.source.y + d.target.y) / 2);
-
   node.attr('transform', d => `translate(${d.x},${d.y})`);
 });
 
-// Resize
 window.addEventListener('resize', () => {
   simulation.force('center', d3.forceCenter(0, 0));
   simulation.alpha(0.1).restart();
@@ -708,16 +869,19 @@ window.addEventListener('resize', () => {
 
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(description="Visualize the decision knowledge graph")
     parser.add_argument("-o", "--output", default=str(DECISIONS_DIR / "graph.html"))
     parser.add_argument("--open", action="store_true", help="Open in browser after generating")
     args = parser.parse_args()
 
     data = collect_graph_data()
-    html = HTML_TEMPLATE.replace("__GRAPH_DATA__", json.dumps(data, indent=2))
+    d3_code = load_d3()
+
+    html = HTML_TEMPLATE.replace("__D3_INLINE__", d3_code)
+    html = html.replace("__GRAPH_DATA__", json.dumps(data, indent=2))
 
     output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     print(json.dumps({"output": str(output_path), "nodes": len(data["nodes"]), "links": len(data["links"])}))
 

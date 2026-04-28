@@ -1,6 +1,6 @@
 ---
 name: decision-record
-description: "Records architectural and tool decisions as ADR files. Auto-invoked by decision detection hook or manually via /frontier-brain:record. Writes ADR directly — no human review needed."
+description: "Records engineering decisions, knowledge, and context as markdown records. Auto-invoked by decision detection hook or manually via /frontier-brain:record. Writes record directly — no human review needed."
 ---
 
 # Decision Record
@@ -16,77 +16,63 @@ description: "Records architectural and tool decisions as ADR files. Auto-invoke
 - Decision is trivial (variable naming, formatting, whitespace)
 - Decision is temporary ("let's try X for now and revisit")
 - No real alternatives were considered or existed
-- Already recorded (search existing ADRs first)
+- Already recorded (search existing records first)
 
 ## Workflow
 
 ```
-1. Run: python bin/decision-engine.py search "<decision topic>"  → check not already recorded
-2. Run: python bin/decision-engine.py next-id                    → get next sequential ID
+1. Run: python3 ~/.claude/frontier-brain/bin/decision-engine.py search "<topic>"  → check not already recorded
+2. Run: python3 ~/.claude/frontier-brain/bin/decision-engine.py next-id            → get next sequential ID
 3. Extract from conversation context:
-   - Context: what problem/question led to decision
-   - Options considered (if discussed)
-   - Decision: what was chosen
-   - Consequences: what changes
+   - Title: concise summary
+   - Type: decision | knowledge | context
    - Tags: infer from topic (lowercase, hyphenated)
-   - Project: infer from working directory / files discussed
-   - Relationships: check existing ADRs for supersedes/related
-4. Write ADR file to decisions/ADR-XXX-slug.md
-5. If decision supersedes an existing ADR, update old ADR status to "superseded"
-6. Run: python bin/decision-engine.py index                      → update both indexes
-7. One-line confirmation: "Recorded ADR-XXX: <title>"
+   - Project: infer from working directory / git remote
+   - Affects: file paths affected (optional)
+   - Body: what was chosen/learned and why (2-5 sentences)
+   - Relationships: check existing records for supersedes/related
+4. Write record file to ~/.claude/decisions/NNN-slug.md
+5. If record supersedes an existing one, update old record status to "superseded"
+6. Run: python3 ~/.claude/frontier-brain/bin/decision-engine.py index  → update brain.db
+7. One-line confirmation: "Recorded #N: <title>"
 ```
 
 ## Checklist
 
 ```
 - [ ] Check quality gate — skip trivial decisions
-- [ ] Search for existing related ADRs
+- [ ] Search for existing related records
 - [ ] Get next ID from decision-engine
-- [ ] Extract context, options, decision, consequences from conversation
-- [ ] Infer tags and project
-- [ ] Detect relationships (supersedes, related_to)
-- [ ] Write ADR file in decisions/ directory
-- [ ] Update superseded ADR status if applicable
-- [ ] Run index to update both databases
+- [ ] Extract title, type, tags, project, body from conversation
+- [ ] Detect relationships (supersedes, related)
+- [ ] Write record file to ~/.claude/decisions/
+- [ ] Update superseded record status if applicable
+- [ ] Run index to update brain.db
 - [ ] Confirm with one line (no review prompt)
 ```
 
-## ADR Template
+## Record Template
 
 ```markdown
 ---
-id: ADR-XXX
+id: <N>
 title: <Title>
-status: accepted
+type: decision
+status: active
 date: <today YYYY-MM-DD>
-tags: [<inferred>]
-supersedes: [<if applicable>]
-related: [<if found>]
 project: <inferred>
+tags: [<inferred>]
+affects: []
+recorded_by: <$USER>
+supersedes: []
+related: []
 ---
-
-## Context
-<extracted from conversation>
-
-## Considered Options
-### <Option A>
-- Pro: ...
-- Con: ...
-### <Option B>
-- Pro: ...
-- Con: ...
-
-## Decision
-<what was chosen and why>
-
-## Consequences
-<what changes>
+Free-text body. 2-5 sentences. What was chosen/learned and why.
 ```
 
 ## Important
 
-- **Do NOT ask for confirmation.** Write the ADR directly.
-- **Do NOT show the full ADR content for review.** Just confirm recording.
-- Keep ADRs concise — 10-20 lines of body content max.
-- If unsure whether something qualifies as a decision, err on the side of recording it.
+- **Do NOT ask for confirmation.** Write the record directly.
+- **Do NOT show the full record content for review.** Just confirm recording.
+- Keep records concise — 2-5 sentences of body content.
+- If unsure whether something qualifies, err on the side of recording it.

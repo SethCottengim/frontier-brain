@@ -2,8 +2,13 @@
   "hooks": {
     "UserPromptSubmit": [
       {
-        "type": "command",
-        "command": "node hooks/decision-detect.js"
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node hooks/decision-detect.js"
+          }
+        ]
       }
     ]
   }

@@ -1,32 +1,16 @@
 ---
-id: ADR-XXX
-title: Title of the Decision
-status: proposed
+id: 0
+title: Title of the Record
+type: decision
+status: active
 date: YYYY-MM-DD
+project: project-name
 tags: []
+affects: []
+recorded_by: e427923
 supersedes: []
 related: []
-project: frontier-brain
 ---
 
-## Context
-
-Why this decision came up.
-
-## Considered Options
-
-### Option A
-- Pro: ...
-- Con: ...
-
-### Option B
-- Pro: ...
-- Con: ...
-
-## Decision
-
-What was chosen and why.
-
-## Consequences
-
-What changes because of this decision.
+Free-text body. 2-5 sentences.
+Captures what was chosen/learned and why.
