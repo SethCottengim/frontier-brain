@@ -79,21 +79,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Decision Knowledge Graph</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
   body {
-    background: #0a0a0f;
-    color: #c4c4cc;
-    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+    background: #060e20;
+    color: #dee5ff;
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
     overflow: hidden;
     height: 100vh;
     width: 100vw;
   }
 
+  /* Animated background canvas */
+  #bg-canvas {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+  }
+
   #graph-container {
     position: absolute;
     inset: 0;
+    z-index: 1;
   }
 
   svg {
@@ -102,208 +112,192 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     display: block;
   }
 
-  /* Glow filter for nodes */
-  .node-glow {
-    filter: url(#glow);
-  }
+  .node-glow { filter: url(#glow); }
 
-  /* Links */
-  .link {
-    stroke-opacity: 0.25;
-    stroke-width: 1;
-  }
-  .link:hover {
-    stroke-opacity: 0.8;
-    stroke-width: 2;
-  }
-  .link-label {
-    font-size: 9px;
-    fill: #666;
-    pointer-events: none;
-    opacity: 0;
-  }
+  .link { stroke-opacity: 0.25; stroke-width: 1; }
+  .link:hover { stroke-opacity: 0.8; stroke-width: 2; }
+  .link-label { font-size: 9px; fill: rgba(58,223,250,0.5); pointer-events: none; opacity: 0; }
 
-  /* Nodes */
-  .node-circle {
-    cursor: grab;
-    transition: r 0.2s ease;
-  }
-  .node-circle:hover {
-    filter: brightness(1.4);
-  }
+  .node-circle { cursor: grab; transition: r 0.2s ease; }
+  .node-circle:hover { filter: brightness(1.4); }
   .node-label {
     font-size: 11px;
-    fill: #aaa;
+    fill: #dee5ff;
     pointer-events: none;
     text-anchor: middle;
     dominant-baseline: central;
-    text-shadow: 0 0 8px #0a0a0f, 0 0 16px #0a0a0f, 0 0 4px #0a0a0f;
+    text-shadow: 0 0 8px #060e20, 0 0 16px #060e20, 0 0 4px #060e20;
   }
-  .node-label.highlighted {
-    fill: #eee;
-    font-weight: 600;
-  }
+  .node-label.highlighted { fill: #fff; font-weight: 600; }
 
-  /* Panel */
+  /* ── Glass card base ── */
+  .glass-dark {
+    position: relative;
+    border-radius: 1rem;
+    background: rgba(15,25,48,0.05);
+    backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(3px);
+    border: 1px solid rgba(255,255,255,0.25);
+    box-shadow:
+      inset 0 1px 2px 0 rgba(255,255,255,0.25),
+      inset 1px 0 2px 0 rgba(255,255,255,0.15),
+      inset 0 -1px 2px 0 rgba(0,0,0,0.35),
+      inset -1px 0 2px 0 rgba(0,0,0,0.25),
+      0 0 20px rgba(255,255,255,0.04),
+      0 4px 6px -1px rgba(0,0,0,0.3),
+      0 8px 20px -2px rgba(0,0,0,0.1),
+      0 0 40px rgba(0,0,0,0.3);
+  }
+  .glass-dark::before {
+    content: '';
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    pointer-events: none; z-index: 0;
+    mask-image: linear-gradient(to right, black 0%, transparent 8%, transparent 92%, black 100%),
+                linear-gradient(to bottom, black 0%, transparent 8%, transparent 92%, black 100%);
+    mask-composite: add;
+    -webkit-mask-image: linear-gradient(to right, black 0%, transparent 8%, transparent 92%, black 100%),
+                        linear-gradient(to bottom, black 0%, transparent 8%, transparent 92%, black 100%);
+    -webkit-mask-composite: source-over;
+    backdrop-filter: blur(10px) brightness(1.8);
+    -webkit-backdrop-filter: blur(10px) brightness(1.8);
+  }
+  .glass-dark::after {
+    content: '';
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    pointer-events: none; z-index: 1;
+    background:
+      linear-gradient(135deg,
+        rgba(255,255,255,0.02) 1%, rgba(255,255,255,0.06) 8%,
+        transparent 35%, transparent 88%, rgba(255,255,255,0.05) 100%),
+      linear-gradient(to right, rgba(255,255,255,0.08) 0%, transparent 2%, transparent 97%, rgba(255,255,255,0.05) 100%),
+      linear-gradient(to bottom, rgba(255,255,255,0.08) 0%, transparent 2%, transparent 97%, rgba(255,255,255,0.03) 100%);
+  }
+  .glass-dark > * { position: relative; z-index: 2; }
+
+  /* ── Info panel ── */
   #info-panel {
     position: fixed;
     top: 16px;
     right: 16px;
-    width: 320px;
+    width: 340px;
     max-height: calc(100vh - 32px);
-    background: rgba(18, 18, 28, 0.92);
-    border: 1px solid rgba(100, 100, 140, 0.2);
-    border-radius: 12px;
-    padding: 20px;
-    backdrop-filter: blur(20px);
+    padding: 24px;
     overflow-y: auto;
     display: none;
     z-index: 10;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
   }
   #info-panel.visible { display: block; }
   #info-panel h2 {
     font-size: 15px;
-    color: #e0e0f0;
+    color: #dee5ff;
     margin-bottom: 4px;
-    font-weight: 600;
+    font-weight: 700;
   }
   #info-panel .adr-id {
     font-size: 11px;
-    color: #7a7aff;
+    color: #3adffa;
     margin-bottom: 12px;
-    font-weight: 500;
-    letter-spacing: 0.5px;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
   }
   #info-panel .meta-row {
     display: flex;
     justify-content: space-between;
     font-size: 12px;
     padding: 4px 0;
-    border-bottom: 1px solid rgba(100,100,140,0.1);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
   }
-  #info-panel .meta-label { color: #666; }
-  #info-panel .meta-value { color: #aaa; }
+  #info-panel .meta-label { color: rgba(222,229,255,0.4); }
+  #info-panel .meta-value { color: #dee5ff; font-weight: 500; }
   #info-panel .tag {
     display: inline-block;
-    background: rgba(120, 120, 255, 0.12);
-    color: #9999ff;
+    background: rgba(58,223,250,0.08);
+    color: #9bffce;
     font-size: 11px;
     padding: 2px 8px;
     border-radius: 10px;
     margin: 2px 3px 2px 0;
   }
   #info-panel .tags-row { margin-top: 10px; }
-  #info-panel .connections {
-    margin-top: 14px;
-    font-size: 12px;
-  }
+  #info-panel .connections { margin-top: 14px; font-size: 12px; }
   #info-panel .connections h3 {
-    font-size: 12px;
-    color: #888;
+    font-size: 10px;
+    color: #3adffa;
     margin-bottom: 6px;
     text-transform: uppercase;
-    letter-spacing: 1px;
-    font-weight: 500;
+    letter-spacing: 0.2em;
+    font-weight: 700;
   }
-  #info-panel .conn-item {
-    padding: 3px 0;
-    color: #aaa;
-    cursor: pointer;
-  }
-  #info-panel .conn-item:hover { color: #bbb; text-decoration: underline; }
-  #info-panel .conn-rel {
-    color: #666;
-    font-size: 10px;
-    margin-right: 6px;
-  }
+  #info-panel .conn-item { padding: 3px 0; color: #dee5ff; cursor: pointer; }
+  #info-panel .conn-item:hover { color: #3adffa; text-decoration: underline; }
+  #info-panel .conn-rel { color: rgba(222,229,255,0.4); font-size: 10px; margin-right: 6px; }
   #info-panel .close-btn {
-    position: absolute;
-    top: 12px;
-    right: 14px;
-    background: none;
-    border: none;
-    color: #666;
-    font-size: 18px;
-    cursor: pointer;
-    line-height: 1;
+    position: absolute; top: 16px; right: 18px;
+    background: none; border: none;
+    color: rgba(222,229,255,0.4); font-size: 18px;
+    cursor: pointer; line-height: 1; z-index: 3;
   }
-  #info-panel .close-btn:hover { color: #aaa; }
+  #info-panel .close-btn:hover { color: #3adffa; }
 
   .status-badge {
-    display: inline-block;
-    font-size: 10px;
-    padding: 1px 7px;
-    border-radius: 8px;
-    font-weight: 500;
-    letter-spacing: 0.3px;
+    display: inline-block; font-size: 10px;
+    padding: 2px 8px; border-radius: 8px;
+    font-weight: 600; letter-spacing: 0.3px;
   }
-  .status-accepted { background: rgba(80,200,120,0.15); color: #50c878; }
-  .status-proposed { background: rgba(100,140,255,0.15); color: #648cff; }
-  .status-superseded { background: rgba(200,120,80,0.15); color: #c87850; }
-  .status-deprecated { background: rgba(150,150,150,0.15); color: #999; }
+  .status-accepted { background: rgba(155,255,206,0.12); color: #9bffce; }
+  .status-proposed { background: rgba(58,223,250,0.12); color: #3adffa; }
+  .status-superseded { background: rgba(200,120,80,0.12); color: #c87850; }
+  .status-deprecated { background: rgba(150,150,150,0.12); color: #999; }
 
-  /* Legend */
+  /* ── Legend ── */
   #legend {
     position: fixed;
     bottom: 16px;
     left: 16px;
-    background: rgba(18, 18, 28, 0.85);
-    border: 1px solid rgba(100, 100, 140, 0.15);
-    border-radius: 10px;
-    padding: 12px 16px;
-    backdrop-filter: blur(12px);
+    padding: 14px 18px;
     z-index: 10;
     font-size: 11px;
   }
   #legend h4 {
     font-size: 10px;
-    color: #666;
+    color: #3adffa;
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 0.2em;
     margin-bottom: 8px;
-    font-weight: 500;
+    font-weight: 700;
   }
   .legend-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 2px 0;
-    color: #888;
+    display: flex; align-items: center;
+    gap: 8px; padding: 2px 0;
+    color: rgba(222,229,255,0.6);
   }
-  .legend-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .legend-line {
-    width: 20px;
-    height: 2px;
-    flex-shrink: 0;
-    border-radius: 1px;
-  }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .legend-line { width: 20px; height: 2px; flex-shrink: 0; border-radius: 1px; }
 
-  /* Title */
+  /* ── Title ── */
   #title {
     position: fixed;
     top: 16px;
     left: 16px;
     z-index: 10;
     font-size: 13px;
-    color: #555;
-    font-weight: 500;
+    color: rgba(222,229,255,0.5);
+    font-weight: 600;
     letter-spacing: 0.5px;
   }
-  #title span { color: #7a7aff; }
+  #title span { color: #3adffa; }
   #node-count {
     font-size: 11px;
-    color: #444;
+    color: rgba(155,255,206,0.4);
     margin-top: 4px;
   }
 </style>
 </head>
 <body>
+
+<canvas id="bg-canvas"></canvas>
 
 <div id="title">
   <span>&#9670;</span> Decision Knowledge Graph
@@ -323,29 +317,78 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </marker>
       <marker id="arrow-informs" viewBox="0 0 10 6" refX="10" refY="3"
               markerWidth="8" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,3 L0,6" fill="#648cff" opacity="0.5"/>
+        <path d="M0,0 L10,3 L0,6" fill="#3adffa" opacity="0.5"/>
       </marker>
       <marker id="arrow-refines" viewBox="0 0 10 6" refX="10" refY="3"
               markerWidth="8" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,3 L0,6" fill="#a78bfa" opacity="0.5"/>
+        <path d="M0,0 L10,3 L0,6" fill="#c180ff" opacity="0.5"/>
       </marker>
     </defs>
   </svg>
 </div>
 
-<div id="info-panel">
+<div id="info-panel" class="glass-dark">
   <button class="close-btn" onclick="closePanel()">&times;</button>
   <div id="panel-content"></div>
 </div>
 
-<div id="legend">
+<div id="legend" class="glass-dark">
   <h4>Relations</h4>
   <div class="legend-item"><div class="legend-line" style="background:#c87850"></div> supersedes</div>
-  <div class="legend-item"><div class="legend-line" style="background:#648cff"></div> informs</div>
-  <div class="legend-item"><div class="legend-line" style="background:#50c878"></div> related_to</div>
-  <div class="legend-item"><div class="legend-line" style="background:#a78bfa"></div> refines</div>
+  <div class="legend-item"><div class="legend-line" style="background:#3adffa"></div> informs</div>
+  <div class="legend-item"><div class="legend-line" style="background:#9bffce"></div> related_to</div>
+  <div class="legend-item"><div class="legend-line" style="background:#c180ff"></div> refines</div>
   <div class="legend-item"><div class="legend-line" style="background:#e05555"></div> contradicts</div>
 </div>
+
+<!-- Animated background -->
+<script>
+(function(){
+  const cv = document.getElementById('bg-canvas');
+  const cx = cv.getContext('2d');
+  let W, H;
+
+  const COLORS = [{r:58,g:223,b:250},{r:193,g:128,b:255},{r:155,g:255,b:206}];
+
+  const orbs = [];
+  for(let i=0;i<4;i++){
+    orbs.push({
+      x:Math.random(), y:Math.random(),
+      vx:(Math.random()-0.5)*0.0003, vy:(Math.random()-0.5)*0.0003,
+      rad:0.18+Math.random()*0.2,
+      col:COLORS[i%COLORS.length],
+      opacity:0.07+Math.random()*0.05,
+    });
+  }
+
+  function resize(){
+    const dpr=window.devicePixelRatio||1;
+    W=window.innerWidth; H=window.innerHeight;
+    cv.width=W*dpr; cv.height=H*dpr;
+    cv.style.width=W+'px'; cv.style.height=H+'px';
+    cx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  resize();
+  window.addEventListener('resize',resize);
+
+  function frame(){
+    cx.clearRect(0,0,W,H);
+    orbs.forEach(o=>{
+      o.x+=o.vx; o.y+=o.vy;
+      if(o.x<-0.2||o.x>1.2) o.vx*=-1;
+      if(o.y<-0.2||o.y>1.2) o.vy*=-1;
+      const r=o.rad*Math.max(W,H);
+      const g=cx.createRadialGradient(o.x*W,o.y*H,0,o.x*W,o.y*H,r);
+      g.addColorStop(0,`rgba(${o.col.r},${o.col.g},${o.col.b},${o.opacity})`);
+      g.addColorStop(1,`rgba(${o.col.r},${o.col.g},${o.col.b},0)`);
+      cx.fillStyle=g;
+      cx.fillRect(o.x*W-r,o.y*H-r,r*2,r*2);
+    });
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
 
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
@@ -353,23 +396,22 @@ const DATA = __GRAPH_DATA__;
 
 const RELATION_COLORS = {
   supersedes: '#c87850',
-  related_to: '#50c878',
-  informs: '#648cff',
+  related_to: '#9bffce',
+  informs: '#3adffa',
   contradicts: '#e05555',
-  refines: '#a78bfa',
+  refines: '#c180ff',
 };
 
 const STATUS_COLORS = {
-  accepted: '#50c878',
-  proposed: '#648cff',
+  accepted: '#9bffce',
+  proposed: '#3adffa',
   superseded: '#c87850',
   deprecated: '#666',
 };
 
-// Tag-based color palette for node coloring
 const TAG_PALETTE = [
-  '#7a7aff', '#ff7ab8', '#50c878', '#ffa94d', '#a78bfa',
-  '#4dc9f6', '#f67019', '#f53794', '#acc236', '#166a8f',
+  '#3adffa', '#c180ff', '#9bffce', '#ffa94d', '#ff7ab8',
+  '#4dc9f6', '#a78bfa', '#50c878', '#f67019', '#acc236',
 ];
 
 const tagColorMap = {};
@@ -427,7 +469,7 @@ function tagCluster(alpha) {
     centroids[tag].x /= counts[tag];
     centroids[tag].y /= counts[tag];
   }
-  const strength = 0.06 * alpha;
+  const strength = 0.02 * alpha;
   DATA.nodes.forEach(d => {
     const tag = (d.tags && d.tags[0]) || '__none__';
     const c = centroids[tag];
@@ -436,23 +478,24 @@ function tagCluster(alpha) {
   });
 }
 
-// Force simulation — tight sphere + tag clustering
+// Force simulation — scales with node count
 const nodeCount = DATA.nodes.length;
-const baseRadius = Math.max(80, Math.sqrt(nodeCount) * 22);
+const baseRadius = Math.max(80, Math.sqrt(nodeCount) * 18);
+const chargeStr = nodeCount > 500 ? -40 : nodeCount > 100 ? -100 : -200;
+const linkDist = nodeCount > 500 ? 25 : nodeCount > 100 ? 45 : 80;
 
 const simulation = d3.forceSimulation(DATA.nodes)
-  .force('link', d3.forceLink(DATA.links).id(d => d.id).distance(45).strength(0.9))
-  .force('charge', d3.forceManyBody().strength(-80).distanceMax(baseRadius * 2))
-  .force('center', d3.forceCenter(0, 0).strength(0.3))
-  .force('radial', d3.forceRadial(baseRadius * 0.6, 0, 0).strength(0.15))
-  .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 3).strength(0.7))
+  .force('link', d3.forceLink(DATA.links).id(d => d.id).distance(linkDist).strength(0.4))
+  .force('charge', d3.forceManyBody().strength(chargeStr).distanceMax(baseRadius * 1.5))
+  .force('center', d3.forceCenter(0, 0).strength(0.1))
+  .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 2).strength(0.6))
   .force('tagCluster', tagCluster)
-  .alphaDecay(0.008)
+  .alphaDecay(0.025)
   .velocityDecay(0.4);
 
 function nodeRadius(d) {
   const count = connectionCount[d.id] || 0;
-  return 2.5 + count * 1;
+  return Math.min(2 + count * 0.3, 6);
 }
 
 // Links
@@ -566,7 +609,7 @@ function highlightNode(d) {
     .attr('opacity', n => connected.has(n.id) ? 0.25 : 0.03);
   node.select('.node-label')
     .attr('opacity', n => connected.has(n.id) ? 0.9 : 0)
-    .attr('fill', n => connected.has(n.id) ? '#ddd' : '#333')
+    .attr('fill', n => connected.has(n.id) ? '#dee5ff' : '#1a2030')
     .classed('highlighted', n => n.id === d.id);
 
   link.attr('stroke-opacity', l => {
@@ -583,7 +626,7 @@ function highlightNode(d) {
 function clearHighlight() {
   node.select('.node-circle').attr('opacity', 0.85);
   node.select('.node-glow').attr('opacity', 0.15);
-  node.select('.node-label').attr('opacity', 0).attr('fill', '#aaa').classed('highlighted', false);
+  node.select('.node-label').attr('opacity', 0).attr('fill', '#dee5ff').classed('highlighted', false);
   link.attr('stroke-opacity', 0.25).attr('stroke-width', 1);
 }
 

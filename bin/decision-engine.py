@@ -8,6 +8,7 @@ Commands:
     graph <id>      Graph traversal, returns all connected decisions as JSON
     related <id>    Combined: graph neighbors + FTS5 on shared tags
     next-id         Returns next sequential ADR ID
+    serve           Start API server with Canvas visualization (default port 8877)
 """
 
 import json
@@ -15,7 +16,9 @@ import os
 import re
 import sqlite3
 import sys
+import webbrowser
 import yaml
+from http.server import HTTPServer
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -26,6 +29,7 @@ SEARCH_DB_PATH = DECISIONS_DIR / "search.db"
 
 sys.path.insert(0, str(PROJECT_DIR / "lib"))
 from graphdb import GraphDB
+from router import Router, APIHandler
 
 INVERSE_RELATIONS = {
     "supersedes": "superseded_by",
@@ -210,6 +214,135 @@ def cmd_next_id():
     print(json.dumps({"next_id": f"ADR-{next_num:03d}", "next_num": next_num}))
 
 
+def cmd_serve(port=8877, open_browser=False):
+    router = Router()
+    adrs_cache = []
+
+    def _load_adrs():
+        if not adrs_cache:
+            adrs_cache.extend(discover_adrs())
+        return adrs_cache
+
+    @router.route('/api/nodes')
+    def nodes(params):
+        adrs = _load_adrs()
+        results = []
+        for adr in adrs:
+            tags = adr.get("tags", []) or []
+            results.append({
+                "id": adr["id"],
+                "title": adr.get("title", ""),
+                "status": adr.get("status", "proposed"),
+                "date": str(adr.get("date", "")),
+                "tags": tags,
+                "project": adr.get("project", ""),
+                "file": adr.get("file", ""),
+            })
+        tag_filter = params.get("tag", [None])[0]
+        if tag_filter:
+            results = [n for n in results if tag_filter in n["tags"]]
+        status_filter = params.get("status", [None])[0]
+        if status_filter:
+            results = [n for n in results if n["status"] == status_filter]
+        project_filter = params.get("project", [None])[0]
+        if project_filter:
+            results = [n for n in results if n["project"].startswith(project_filter)]
+        limit = int(params.get("limit", [0])[0] or 0)
+        offset = int(params.get("offset", [0])[0] or 0)
+        if limit:
+            results = results[offset:offset + limit]
+        elif offset:
+            results = results[offset:]
+        return {"nodes": results, "total": len(_load_adrs())}
+
+    @router.route('/api/links')
+    def links(params):
+        if not GRAPH_DB_PATH.exists():
+            return {"links": [], "total": 0}
+        db = GraphDB(str(GRAPH_DB_PATH))
+        all_links = []
+        for src, rel, dst in db.list_relations():
+            if rel == "superseded_by" or (rel == "related_to" and src > dst):
+                continue
+            all_links.append({"source": src, "target": dst, "relation": rel})
+        db.close()
+        node_filter = params.get("node", [None])[0]
+        if node_filter:
+            all_links = [l for l in all_links if l["source"] == node_filter or l["target"] == node_filter]
+        rel_filter = params.get("relation", [None])[0]
+        if rel_filter:
+            all_links = [l for l in all_links if l["relation"] == rel_filter]
+        return {"links": all_links, "total": len(all_links)}
+
+    @router.route('/api/search')
+    def search(params):
+        query = params.get("q", [""])[0]
+        if not query or not SEARCH_DB_PATH.exists():
+            return {"query": query, "results": [], "count": 0}
+        conn = sqlite3.connect(str(SEARCH_DB_PATH))
+        safe_query = sanitize_fts5_query(query)
+        rows = conn.execute(
+            """SELECT id, title, tags, project, file, rank,
+                      snippet(decisions, 3, '<b>', '</b>', '...', 32)
+               FROM decisions
+               WHERE decisions MATCH ?
+               ORDER BY rank
+               LIMIT 20""",
+            (safe_query,),
+        ).fetchall()
+        conn.close()
+        results = [
+            {"id": r[0], "title": r[1], "rank": r[5], "snippet": r[6]}
+            for r in rows
+        ]
+        return {"query": query, "results": results, "count": len(results)}
+
+    @router.route('/api/tags')
+    def tags(params):
+        adrs = _load_adrs()
+        tag_counts = {}
+        for adr in adrs:
+            for t in (adr.get("tags", []) or []):
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+        tag_list = sorted([{"name": k, "count": v} for k, v in tag_counts.items()], key=lambda x: -x["count"])
+        return {"tags": tag_list}
+
+    @router.route('/api/stats')
+    def stats(params):
+        adrs = _load_adrs()
+        statuses = {}
+        tag_set = set()
+        for adr in adrs:
+            s = adr.get("status", "proposed")
+            statuses[s] = statuses.get(s, 0) + 1
+            for t in (adr.get("tags", []) or []):
+                tag_set.add(t)
+        link_count = 0
+        if GRAPH_DB_PATH.exists():
+            db = GraphDB(str(GRAPH_DB_PATH))
+            for src, rel, dst in db.list_relations():
+                if rel == "superseded_by" or (rel == "related_to" and src > dst):
+                    continue
+                link_count += 1
+            db.close()
+        return {"nodes": len(adrs), "links": link_count, "tags": len(tag_set), "statuses": statuses}
+
+    APIHandler.router = router
+    APIHandler.static_dir = SCRIPT_DIR / 'static'
+
+    server = HTTPServer(('localhost', port), APIHandler)
+    count = len(_load_adrs())
+    print(json.dumps({"serving": f"http://localhost:{port}", "nodes": count}))
+
+    if open_browser:
+        webbrowser.open(f"http://localhost:{port}")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.server_close()
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -235,6 +368,20 @@ def main():
         cmd_related(sys.argv[2])
     elif cmd == "next-id":
         cmd_next_id()
+    elif cmd == "serve":
+        port = 8877
+        open_browser = False
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--port" and i + 1 < len(sys.argv):
+                port = int(sys.argv[i + 1])
+                i += 2
+            elif sys.argv[i] == "--open":
+                open_browser = True
+                i += 1
+            else:
+                i += 1
+        cmd_serve(port=port, open_browser=open_browser)
     else:
         print(json.dumps({"error": f"unknown command: {cmd}"}))
         sys.exit(1)
