@@ -8,6 +8,7 @@ Commands:
     search <query>  FTS5 full-text search (--project, --type filters)
     graph <id>      Traverse relationships, return connected records
     related <id>    Graph neighbors + tag-matched records
+    cross-link      Discover cross-project record pairs ranked by similarity
 """
 
 import json
@@ -335,6 +336,240 @@ def cmd_related(args: list[str]):
     print(json.dumps({"root": record_id, "count": len(results), "related": results}))
 
 
+# ---------------------------------------------------------------------------
+# Cross-link discovery
+# ---------------------------------------------------------------------------
+
+_STOP_WORDS = frozenset(
+    "a an and are as at be but by for from has have if in into is it"
+    " its no not of on or so than that the their then there these they"
+    " this to was we were what when where which while who will with".split()
+)
+
+# Weights for combined scoring
+_W_PRIMARY_TAG = 0.35   # shared primary_tag
+_W_SHARED_TAGS = 0.30   # shared tags (excluding primary if already counted)
+_W_TEXT_SIM = 0.35       # title + body text similarity
+
+# Minimum combined score to surface a candidate
+_DEFAULT_THRESHOLD = 0.10
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, strip punctuation, remove stop words."""
+    tokens = re.findall(r"[a-z0-9]+(?:[-_][a-z0-9]+)*", text.lower())
+    return [t for t in tokens if t not in _STOP_WORDS and len(t) > 1]
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    """Jaccard similarity between two sets."""
+    if not a and not b:
+        return 0.0
+    intersection = a & b
+    union = a | b
+    return len(intersection) / len(union) if union else 0.0
+
+
+def _load_records_for_crosslink(conn: sqlite3.Connection) -> list[dict]:
+    """Load all records from the DB with parsed fields needed for scoring."""
+    rows = conn.execute(
+        "SELECT id, title, type, project, tags_json, body, primary_tag "
+        "FROM decisions"
+    ).fetchall()
+    records = []
+    for row in rows:
+        rid, title, rtype, project, tags_json, body, primary_tag = row
+        tags = json.loads(tags_json or "[]")
+        # If primary_tag not in DB, try to infer from markdown source of truth
+        if not primary_tag:
+            md_file = DECISIONS_DIR / conn.execute(
+                "SELECT file FROM decisions WHERE id = ?", (rid,)
+            ).fetchone()[0]
+            if md_file.exists():
+                try:
+                    meta, _ = parse_frontmatter(md_file.read_text(encoding="utf-8"))
+                    primary_tag = meta.get("primary_tag", "")
+                except (ValueError, OSError):
+                    primary_tag = ""
+        records.append({
+            "id": rid,
+            "title": title or "",
+            "type": rtype or "",
+            "project": project or "",
+            "tags": set(tags),
+            "primary_tag": primary_tag or "",
+            "body": body or "",
+            "text_tokens": set(_tokenize(f"{title or ''} {body or ''}")),
+        })
+    return records
+
+
+def _score_pair(a: dict, b: dict) -> tuple[float, str]:
+    """Compute similarity score and rationale for a cross-project record pair.
+
+    Returns (score, rationale). Score is in [0, 1].
+    """
+    reasons = []
+
+    # --- Primary tag overlap ---
+    primary_score = 0.0
+    if a["primary_tag"] and a["primary_tag"] == b["primary_tag"]:
+        primary_score = 1.0
+        reasons.append(f"shared primary tag '{a['primary_tag']}'")
+
+    # --- Shared tags (other than primary if already counted) ---
+    shared_tags = a["tags"] & b["tags"]
+    if primary_score > 0 and a["primary_tag"] in shared_tags:
+        shared_tags_extra = shared_tags - {a["primary_tag"]}
+    else:
+        shared_tags_extra = shared_tags
+
+    # Normalize: fraction of smaller tag set that overlaps
+    min_tags = min(len(a["tags"]), len(b["tags"]))
+    tag_score = len(shared_tags_extra) / max(min_tags, 1)
+    tag_score = min(tag_score, 1.0)
+
+    if shared_tags_extra:
+        reasons.append(f"shared tags: {', '.join(sorted(shared_tags_extra))}")
+
+    # --- Text similarity (Jaccard on tokens of title+body) ---
+    text_score = _jaccard(a["text_tokens"], b["text_tokens"])
+    if text_score > 0.05:
+        # Find the most distinctive shared words for rationale
+        shared_words = a["text_tokens"] & b["text_tokens"]
+        top_words = sorted(shared_words)[:5]
+        reasons.append(f"text overlap ({text_score:.0%}): {', '.join(top_words)}")
+
+    # --- Combined weighted score ---
+    combined = (
+        _W_PRIMARY_TAG * primary_score
+        + _W_SHARED_TAGS * tag_score
+        + _W_TEXT_SIM * text_score
+    )
+
+    rationale = "; ".join(reasons) if reasons else "weak signal"
+    return round(combined, 4), rationale
+
+
+def discover_cross_links(
+    conn: sqlite3.Connection,
+    threshold: float = _DEFAULT_THRESHOLD,
+    filter_record_id: int | None = None,
+) -> list[dict]:
+    """Find cross-project record pairs ranked by similarity score.
+
+    If *filter_record_id* is given, only return pairs involving that record.
+    """
+    records = _load_records_for_crosslink(conn)
+
+    candidates: list[dict] = []
+    seen_pairs: set[tuple[int, int]] = set()
+
+    for i, a in enumerate(records):
+        for j, b in enumerate(records):
+            if j <= i:
+                continue
+            # Only cross-project pairs
+            if a["project"] == b["project"]:
+                continue
+            # If filtering to a specific record
+            if filter_record_id is not None:
+                if a["id"] != filter_record_id and b["id"] != filter_record_id:
+                    continue
+            pair_key = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+
+            score, rationale = _score_pair(a, b)
+            if score >= threshold:
+                candidates.append({
+                    "source_id": a["id"],
+                    "target_id": b["id"],
+                    "score": score,
+                    "rationale": rationale,
+                    "source_project": a["project"],
+                    "target_project": b["project"],
+                })
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    return candidates
+
+
+def auto_suggest(record_id: int, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """After indexing a new record, check for cross-project matches.
+
+    Returns list of candidate dicts (same format as discover_cross_links).
+    Prints suggestions to stderr if any found.
+    """
+    close_conn = False
+    if conn is None:
+        conn = init_db()
+        close_conn = True
+
+    try:
+        candidates = discover_cross_links(conn, filter_record_id=record_id)
+        if candidates:
+            rec = conn.execute(
+                "SELECT title FROM decisions WHERE id = ?", (record_id,)
+            ).fetchone()
+            title = rec[0] if rec else f"record {record_id}"
+            print(
+                json.dumps({
+                    "auto_suggest": True,
+                    "record_id": record_id,
+                    "title": title,
+                    "cross_project_matches": len(candidates),
+                    "top_candidates": candidates[:5],
+                }),
+                file=sys.stderr,
+            )
+        return candidates
+    finally:
+        if close_conn:
+            conn.close()
+
+
+def cmd_cross_link(args: list[str]):
+    """CLI handler for the cross-link subcommand."""
+    threshold = _DEFAULT_THRESHOLD
+    record_id = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--threshold" and i + 1 < len(args):
+            threshold = float(args[i + 1])
+            i += 2
+        elif args[i] == "--record" and i + 1 < len(args):
+            record_id = int(args[i + 1])
+            i += 2
+        elif args[i] == "--top" and i + 1 < len(args):
+            # handled below
+            i += 2
+        else:
+            i += 1
+
+    # Re-parse --top
+    top_n = None
+    for idx, a in enumerate(args):
+        if a == "--top" and idx + 1 < len(args):
+            top_n = int(args[idx + 1])
+
+    conn = init_db()
+    candidates = discover_cross_links(conn, threshold=threshold, filter_record_id=record_id)
+    conn.close()
+
+    if top_n is not None:
+        candidates = candidates[:top_n]
+
+    print(json.dumps({
+        "command": "cross-link",
+        "threshold": threshold,
+        "filter_record_id": record_id,
+        "count": len(candidates),
+        "candidates": candidates,
+    }))
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -352,6 +587,8 @@ def main():
         cmd_graph(rest)
     elif cmd == "related":
         cmd_related(rest)
+    elif cmd == "cross-link":
+        cmd_cross_link(rest)
     elif cmd == "detect-project":
         print(json.dumps({"project": detect_project()}))
     else:
